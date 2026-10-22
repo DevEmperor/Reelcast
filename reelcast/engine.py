@@ -102,7 +102,7 @@ class Engine:
             dur, _ = encode.probe(dest)
             return Result(dest, "vorhanden", dur, skipped=True, note="existiert bereits")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        cover = encode.fetch_cover(ep.cover_url)
+        cover = encode.fetch_cover(ep.cover_url) or encode.fetch_cover(feeds.show_artwork_url(ep.show))
         decorate_folders(self.opts.out_dir, dest.parent, cover)
 
         if self.opts.mode in ("auto", "feed"):

@@ -164,6 +164,17 @@ def candidate_feeds(ep: Episode) -> tuple[list[str], list[FeedHit]]:
     return feeds, direct
 
 
+def show_artwork_url(show: str) -> str:
+    """Podcast-Cover aus Apple Podcasts (Ersatz, falls Spotifys Bildserver nicht erreichbar sind)."""
+    if not show:
+        return ""
+    for r in _itunes({"media": "podcast", "entity": "podcast", "limit": 10, "term": show}):
+        if similarity(r.get("collectionName", ""), show) >= 0.85:
+            url = r.get("artworkUrl600") or r.get("artworkUrl100") or ""
+            return url.replace("100x100bb", "600x600bb")
+    return ""
+
+
 def search_feed(feed_url: str, ep: Episode) -> FeedHit | None:
     try:
         root = ET.fromstring(net.get_bytes(feed_url))
