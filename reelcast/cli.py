@@ -70,25 +70,6 @@ def _size(n: float) -> str:
     return str(n)
 
 
-def level_meter(db: float, hold: float, width: int = 30) -> Text:
-    lo = -60.0
-    frac = max(0.0, min(1.0, (db - lo) / -lo))
-    hold_pos = min(width - 1, int(max(0.0, min(1.0, (hold - lo) / -lo)) * width))
-    filled = int(frac * width)
-    t = Text("PEGEL ", style=DIM)
-    for i in range(width):
-        pos_db = lo + (i + 1) / width * -lo
-        color = "#3ddc84" if pos_db < -12 else AMBER if pos_db < -3 else REC
-        if i < filled:
-            t.append("█", style=color)
-        elif i == hold_pos and hold > lo:
-            t.append("▏", style=color)
-        else:
-            t.append("·", style=DARK)
-    t.append(f"  {db:5.1f} dB" if db > -100 else "  Stille", style=DIM)
-    return t
-
-
 def _reel(size: int, spoke: str) -> Text:
     """Spule; `size` 0…3 = wie viel Band noch darauf ist."""
     t = Text(" " * (3 - size))
@@ -129,9 +110,6 @@ class LiveReporter(Reporter):
         self.done = 0.0
         self.total: float | None = None
         self.unit = "s"
-        self.db = -120.0
-        self.hold = -120.0
-        self.hold_t = 0.0
         self.levels: deque = deque(maxlen=64)
         self._acc: list[float] = []
         self.mode = ""  # "", "rec", "enc"
@@ -164,10 +142,6 @@ class LiveReporter(Reporter):
         self.rate_samples = [s for s in self.rate_samples if now - s[0] < 5]
 
     def level(self, peak_db: float) -> None:
-        self.db = peak_db
-        now = time.monotonic()
-        if peak_db >= self.hold or now - self.hold_t > 1.5:
-            self.hold, self.hold_t = peak_db, now
         self._acc.append(peak_db)
         if len(self._acc) >= 3:  # ein Wellenbalken = 0,3 s
             self.levels.append(max(self._acc))
@@ -230,8 +204,6 @@ class LiveReporter(Reporter):
                 f"{frac * 100:3.0f} %  {label}  {self._eta()}",
             )
             rows += [Text(""), line]
-        if self.mode == "rec":
-            rows.append(level_meter(self.db, self.hold))
         return Panel(
             Group(*rows),
             title=Text(" REELCAST ", style=f"bold black on {AMBER}"),
