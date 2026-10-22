@@ -38,7 +38,6 @@ class Episode:
 @dataclass
 class Options:
     out_dir: Path
-    mode: str = "auto"  # auto | feed | spotify
     fmt: str = "mp3"  # mp3 | m4a | opus | flac
     quality: int = 2  # LAME-VBR-Stufe 0 (beste) … 9
     listen: bool = False  # Aufnahme über die Lautsprecher mithören
@@ -51,7 +50,7 @@ class Options:
 @dataclass
 class Result:
     path: Path
-    source: str  # "feed" | "spotify"
+    source: str  # "spotify" | "vorhanden"
     duration: float
     skipped: bool = False
     note: str = ""

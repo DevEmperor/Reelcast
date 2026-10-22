@@ -1,12 +1,8 @@
-"""Reelcast – Podcast-Folgen von Spotify als MP3 einfangen.
+"""Reelcast – Podcast-Folgen von Spotify als MP3 mitschneiden.
 
-Zwei Wege, automatisch gewählt:
-
-* **Feed** – die meisten Podcasts sind öffentlich per RSS verteilt. Findet sich
-  die Folge dort, wird die Originaldatei in Sekunden geladen (kein Umkodieren
-  von Spotify-Audio, volle Qualität).
-* **Aufnahme** – sonst spielt Spotify die Folge auf einem virtuellen Ausgang ab
-  und Reelcast nimmt genau diesen Strom auf (Echtzeit, still im Hintergrund).
+Spotify spielt die Folge auf einem virtuellen PipeWire-Ausgang ab; Reelcast nimmt
+genau diesen Strom auf (Echtzeit, still im Hintergrund), schneidet, taggt und
+speichert sie als MP3.
 """
 
 __version__ = "1.0.0"

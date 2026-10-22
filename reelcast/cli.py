@@ -54,7 +54,7 @@ def banner() -> Group:
             t.append(ch, style=f"bold {_blend(AMBER, ORANGE, i / max(1, width - 1))}")
         lines.append(t)
     lines[0].append(f"   v{__version__}", style=DIM)
-    lines[1].append("   Podcasts von Spotify einfangen", style=DIM)
+    lines[1].append("   Podcasts von Spotify mitschneiden", style=DIM)
     return Group(*lines)
 
 
@@ -100,7 +100,7 @@ def _reel(size: int, spoke: str) -> Text:
 
 
 def cassette(progress: float, levels: deque, spinning: bool, width: int = 46) -> Group:
-    """Kassette mit drehenden Spulen; dazwischen die gerade eingefangene Welle."""
+    """Kassette mit drehenden Spulen; dazwischen die gerade aufgenommene Welle."""
     phase = int(time.monotonic() * 8) if spinning else 0
     left = _reel(round((1 - progress) * 3), SPOKES[phase % 4])
     right = _reel(round(progress * 3), SPOKES[(phase + 2) % 4])
@@ -134,7 +134,7 @@ class LiveReporter(Reporter):
         self.hold_t = 0.0
         self.levels: deque = deque(maxlen=64)
         self._acc: list[float] = []
-        self.mode = ""  # "", "feed", "rec", "enc"
+        self.mode = ""  # "", "rec", "enc"
         self.rate_samples: list[tuple[float, float]] = []
         self.live: Live | None = None
 
@@ -147,10 +147,8 @@ class LiveReporter(Reporter):
         self.phase_text = text
         if text.startswith("Nehme auf"):
             self.mode = "rec"
-        elif text.startswith("Lade"):
-            self.mode = "feed"
-        elif text.startswith(("Kodiere", "Schreibe")):
-            self.mode = "enc" if self.mode == "rec" else self.mode
+        elif text.startswith("Kodiere"):
+            self.mode = "enc"
         self.done, self.total, self.rate_samples = 0.0, None, []
 
     def info(self, text: str) -> None:
@@ -196,8 +194,6 @@ class LiveReporter(Reporter):
             badge.append("● " if int(now * 2) % 2 == 0 else "○ ", style=f"bold {REC}")
             badge.append("REC", style=f"bold {REC}")
             badge.append(f"  {fmt_duration(self.done)}", style=f"bold {CREAM}")
-        elif self.mode == "feed":
-            badge.append("⇣ FEED", style=f"bold {AMBER}")
         elif self.mode == "enc":
             badge.append("◆ MP3", style=f"bold {AMBER}")
         else:
@@ -296,11 +292,7 @@ def run_jobs(links: list[str], opts: Options) -> int:
                 continue
             res = outcome["result"]
             results.append((title, res, ""))
-            how = {
-                "feed": "Originaldatei aus dem Podcast-Feed",
-                "spotify": "von Spotify aufgenommen",
-                "vorhanden": "war schon da",
-            }[res.source]
+            how = {"spotify": "von Spotify mitgeschnitten", "vorhanden": "war schon da"}[res.source]
             mark = ("↷ ", DIM) if res.skipped else ("✓ ", f"bold {AMBER}")
             console.print(Text.assemble(mark, (title, f"bold {CREAM}")))
             details = f"  {how} · {fmt_duration(res.duration)}"
@@ -313,23 +305,19 @@ def run_jobs(links: list[str], opts: Options) -> int:
             engine.close()
     if len(links) > 1:
         ok = sum(1 for _, r, _ in results if r)
-        console.print(Text(f"\n{ok} von {len(links)} Folgen eingefangen.", style="bold"))
+        console.print(Text(f"\n{ok} von {len(links)} Folgen mitgeschnitten.", style="bold"))
     return 130 if cancel.cancelled else (1 if failures else 0)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="reelcast",
-        description="Reelcast – Podcast-Folgen von Spotify als MP3 einfangen: als Originaldatei aus "
-        "dem öffentlichen Feed oder per Aufnahme der Spotify-Wiedergabe.",
+        description="Reelcast – Podcast-Folgen von Spotify als MP3 mitschneiden. Spotify spielt "
+        "still auf einem virtuellen Ausgang, Reelcast nimmt genau diesen Strom auf.",
     )
     p.add_argument("links", nargs="*", metavar="LINK", help="Spotify-Folgenlink(s) oder spotify:episode:…")
     p.add_argument("-l", "--liste", type=Path, help="Datei mit Links (einer pro Zeile)")
     p.add_argument("-o", "--ziel", type=Path, help=f"Zielordner (Standard: {default_out_dir()})")
-    p.add_argument(
-        "-m", "--modus", choices=("auto", "feed", "spotify"), default="auto",
-        help="auto = erst Feed, sonst Aufnahme (Standard); feed = nur Feed; spotify = immer aufnehmen",
-    )
     p.add_argument("-f", "--format", choices=("mp3", "m4a", "opus", "flac"), default="mp3")
     p.add_argument("-q", "--qualitaet", type=int, default=2, choices=range(10), metavar="0-9",
                    help="MP3-VBR-Stufe, 0 = beste (Standard 2 ≈ 190 kbit/s)")
@@ -379,7 +367,6 @@ def main(argv: list[str] | None = None) -> int:
 
     opts = Options(
         out_dir=(args.ziel or default_out_dir()).expanduser(),
-        mode=args.modus,
         fmt=args.format,
         quality=args.qualitaet,
         listen=args.mithoeren,

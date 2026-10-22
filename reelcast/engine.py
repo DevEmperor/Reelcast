@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import mimetypes
-import urllib.parse
 from pathlib import Path
 
-from . import encode, feeds, recorder
+from . import artwork, encode, recorder
 from .model import (
     CancelToken,
     Episode,
@@ -102,16 +100,9 @@ class Engine:
             dur, _ = encode.probe(dest)
             return Result(dest, "vorhanden", dur, skipped=True, note="existiert bereits")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        cover = encode.fetch_cover(ep.cover_url) or encode.fetch_cover(feeds.show_artwork_url(ep.show))
+        cover = encode.fetch_cover(ep.cover_url) or encode.fetch_cover(artwork.show_artwork_url(ep.show))
         decorate_folders(self.opts.out_dir, dest.parent, cover)
 
-        if self.opts.mode in ("auto", "feed"):
-            hit = feeds.find_episode(ep, self.reporter, self.cancel)
-            if hit:
-                return self._from_feed(ep, hit, dest, cover)
-            if self.opts.mode == "feed":
-                raise ReelcastError("Die Folge ist in keinem öffentlichen Feed zu finden.")
-            self.reporter.info("→ Nehme die Folge über Spotify auf (Echtzeit).")
         if not ep.playable:
             raise ReelcastError("Spotify meldet die Folge als nicht abspielbar.")
         return self._from_spotify(ep, dest, cover)
@@ -125,37 +116,7 @@ class Engine:
                 self._spotify.close()
                 self._spotify = None
 
-    # ---- Wege ---------------------------------------------------------------
-
-    def _from_feed(self, ep: Episode, hit: feeds.FeedHit, dest: Path, cover) -> Result:
-        host = urllib.parse.urlsplit(hit.feed_url or hit.audio_url).netloc
-        self.reporter.info(f"Gefunden im öffentlichen Feed ({host}): {hit.title}")
-        self.reporter.phase("Lade Originaldatei …")
-        ext = Path(urllib.parse.urlsplit(hit.audio_url).path).suffix.lower()
-        if ext not in (".mp3", ".m4a", ".mp4", ".aac", ".ogg", ".opus", ".flac", ".wav"):
-            ext = mimetypes.guess_extension(hit.mime or "") or ".audio"
-        tmp = dest.with_name(f".reelcast-{ep.id}{ext}")
-        try:
-            from . import net
-
-            net.download(hit.audio_url, tmp, self.reporter, self.cancel)
-            dur, codec = encode.probe(tmp)
-            want_codec = encode.FORMATS[self.opts.fmt][1]
-            copy = codec == want_codec
-            if ep.duration and abs(dur - ep.duration) > max(20, 0.05 * ep.duration):
-                self.reporter.warn(
-                    f"Feed-Datei ist {fmt_duration(dur)} lang, Spotify-Fassung {fmt_duration(ep.duration)}."
-                )
-            self.reporter.phase("Schreibe Tags und Cover …" if copy else "Kodiere …")
-            encode.finalize(
-                tmp, dest, ep, self.opts.fmt, self.opts.quality, cover, self.reporter, self.cancel,
-                copy=copy, source_note=f"Quelle: Podcast-Feed {host}",
-            )
-        finally:
-            tmp.unlink(missing_ok=True)
-        dur, _ = encode.probe(dest)
-        note = "Originaldatei, nicht neu kodiert" if copy else f"aus {codec} umgewandelt"
-        return Result(dest, "feed", dur, note=note)
+    # ---- Aufnahme -----------------------------------------------------------
 
     def _from_spotify(self, ep: Episode, dest: Path, cover) -> Result:
         if self._spotify is None:

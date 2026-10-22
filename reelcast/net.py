@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 
 from . import __version__
-from .model import CancelToken, ReelcastError, Reporter
+from .model import ReelcastError
 
 UA = f"Mozilla/5.0 (X11; Linux x86_64) Reelcast/{__version__}"
 TIMEOUT = 20
@@ -46,34 +44,3 @@ def get_text(url: str, **kw) -> str:
 
 def get_json(url: str, **kw):
     return json.loads(get_bytes(url, **kw))
-
-
-def download(url: str, dest: Path, reporter: Reporter, cancel: CancelToken) -> str:
-    """Lädt `url` nach `dest` (über eine .part-Datei). Gibt den Content-Type zurück."""
-    part = dest.with_name(dest.name + ".part")
-    try:
-        with urllib.request.urlopen(_request(url), timeout=TIMEOUT) as r:
-            total = int(r.headers.get("Content-Length") or 0) or None
-            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
-            done = 0
-            last_report = 0.0
-            with open(part, "wb") as f:
-                while True:
-                    cancel.check()
-                    chunk = r.read(256 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    done += len(chunk)
-                    now = time.monotonic()
-                    if now - last_report > 0.1:
-                        reporter.progress(done, total, "B")
-                        last_report = now
-            reporter.progress(done, total or done, "B")
-        if total and done < total:
-            raise ReelcastError(f"Download unvollständig ({done} von {total} Bytes)")
-        os.replace(part, dest)
-        return ctype
-    except BaseException:
-        part.unlink(missing_ok=True)
-        raise
