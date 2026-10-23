@@ -30,9 +30,9 @@ from pathlib import Path
 import numpy as np
 
 from . import artwork, doctor, encode, paths, __version__
-from .audio import ENV_BLOCK, RATE, CaptureSink, Segment, StreamCapture
+from .audio import ENV_BLOCK, RATE, Segment, StreamCapture
+from .backend import CaptureSink, Spotify
 from .model import CancelToken, Cancelled, Options, Reporter, fmt_duration
-from .player import Spotify
 from .spotify_meta import fetch_episode, fetch_track_release
 
 TICK = 0.1
@@ -101,6 +101,7 @@ class _Item:
     seeked: bool = False
     speed: float | None = None
     prev_boundary: "_Boundary | None" = None
+    late_start: bool = False  # audio reached the recording late – don't trust its start
 
 
 class _Boundary:
@@ -148,6 +149,7 @@ class AutoSession:
         self._lat_low: list[float] = []
         self._lat_high: list[float] = []
         self._open_boundary: _Boundary | None = None
+        self._late_flag = False
         self.workdir = opts.out_dir / ".reelcast-tmp"
 
     # ---- Ablauf -------------------------------------------------------------
@@ -164,7 +166,7 @@ class AutoSession:
             with CaptureSink(listen=self.opts.listen) as sink:
                 sink.route()
                 sink.watch()
-                cap = StreamCapture(sink.name, self.workdir, on_level=self.rep.level)
+                cap = StreamCapture(sink, self.workdir, on_level=self.rep.level)
                 cap.start()
                 try:
                     self._loop(sp, sink, cap)
@@ -184,6 +186,7 @@ class AutoSession:
         shown = ""
         next_route = 0.0
         warned_volume = False
+        warned_problem = ""
 
         def show(text: str) -> None:
             nonlocal shown
@@ -219,6 +222,10 @@ class AutoSession:
                     continue
                 tid = str(meta.get("mpris:trackid", ""))
                 if status == "Unknown":
+                    problem = getattr(sp, "last_error", "")
+                    if problem and problem != warned_problem:
+                        warned_problem = problem
+                        self.rep.warn(problem)
                     continue
                 if not tid or status == "Stopped" or pos is None:
                     if item:
@@ -273,6 +280,7 @@ class AutoSession:
         item = _Item(entry, tid, meta, seg, first_pos=pos, last_pos=pos, last_wall=now, last_frame=frame)
         item.z_runs[0].append(frame - pos * RATE)
         item.prev_boundary, self._open_boundary = self._open_boundary, None
+        item.late_start, self._late_flag = self._late_flag, False
         if item.prev_boundary and pos > START_TOL:
             item.prev_boundary.set(None)  # not a direct transition
         self.entries.append(entry)
@@ -326,6 +334,7 @@ class AutoSession:
         cap.end_segment(item.seg, cap.frames)
         threading.Thread(target=item.seg.discard, daemon=True).start()
         item.entry.state = "dropped"
+        self._late_flag = True
         self.entries.remove(item.entry)
         self.rep.entry(item.entry)
         self.rep.info("Spotify's audio arrived a moment late – jumped back to the start of the track.")
@@ -382,20 +391,41 @@ class AutoSession:
     # ---- cutting and saving (own thread) ----------------------------------------
 
     def _encoder(self) -> None:
-        while True:
-            job = self._jobs.get()
-            if job is None:
-                return
-            item, start, end, stalls, boundary = job
-            try:
-                self._save(item, start, end, stalls, boundary)
-            except Exception as e:
-                item.entry.state, item.entry.reason = "failed", str(e)[:200]
-                self.rep.entry(item.entry)
-                if item.seg:
-                    item.seg.path.unlink(missing_ok=True)
+        """Measure every finished track at once, but cut only once the latency is known.
 
-    def _save(self, item: _Item, start: float, end: float, stalls, boundary) -> None:
+        The first boundary of a session is often unreliable (the stream was just being
+        routed). Tracks wait – at most a few – until three clean bound measurements
+        exist or the session ends, then they're cut with the best estimate.
+        """
+        pending: list[dict] = []
+        closing = False
+        while not (closing and not pending):
+            try:
+                job = self._jobs.get(timeout=0.5)
+            except queue.Empty:
+                job = False
+            if job is None:
+                closing = True
+            elif job:
+                try:
+                    pending.append(self._measure(*job))
+                except Exception as e:
+                    self._fail(job[0], e)
+            enough = len(self._lat_low) + len(self._lat_high) >= 3
+            while pending and (enough or closing or len(pending) > 3):
+                prepared = pending.pop(0)
+                try:
+                    self._save(prepared)
+                except Exception as e:
+                    self._fail(prepared["item"], e)
+
+    def _fail(self, item: _Item, error: Exception) -> None:
+        item.entry.state, item.entry.reason = "failed", str(error)[:200]
+        self.rep.entry(item.entry)
+        if item.seg:
+            item.seg.path.unlink(missing_ok=True)
+
+    def _measure(self, item: _Item, start: float, end: float, stalls, boundary) -> dict:
         seg = item.seg
         seg.done.wait()
         if boundary:
@@ -403,26 +433,30 @@ class AutoSession:
             # Gapless transition: the start of the next track is the more precise end
             if boundary.z is not None and abs(boundary.z - end) < 0.5 * RATE:
                 end = boundary.z
-        entry = item.entry
         if seg.error:
             raise RuntimeError(seg.error)
-        env = seg.envelope
         s_raw, e_raw = start - seg.first_frame, end - seg.first_frame
-        for z in (s_raw, e_raw):
-            low, high = _bounds(env, z)
+        points = [e_raw] if item.late_start else [s_raw, e_raw]
+        for z in points:
+            low, high = _bounds(seg.envelope, z)
             if low is not None:
                 self._lat_low = (self._lat_low + [low])[-30:]
             if high is not None:
                 self._lat_high = (self._lat_high + [high])[-30:]
+        return {"item": item, "s_raw": s_raw, "e_raw": e_raw, "stalls": stalls}
+
+    def _save(self, prepared: dict) -> None:
+        item, s_raw, e_raw, stalls = prepared["item"], prepared["s_raw"], prepared["e_raw"], prepared["stalls"]
+        seg, entry, env = item.seg, item.entry, item.seg.envelope
         latency = _estimate_latency(self._lat_low, self._lat_high)
         s_cut, s_moved = _refine(env, s_raw + latency)
         e_cut, e_moved = _refine(env, e_raw + latency)
         if DEBUG:
             ms = lambda f: f"{f / RATE * 1000:7.1f}"  # noqa: E731
             print(f"[reelcast] {entry.title[:24]:24} start {ms(s_raw)}→{ms(s_cut)}{'*' if s_moved else ' '} "
-                  f"ende {ms(e_raw)}→{ms(e_cut)}{'*' if e_moved else ' '} laufzeit {ms(latency)} "
-                  f"unten {[round(v / RATE * 1000) for v in self._lat_low]} "
-                  f"oben {[round(v / RATE * 1000) for v in self._lat_high]}", file=sys.stderr)
+                  f"end {ms(e_raw)}→{ms(e_cut)}{'*' if e_moved else ' '} latency {ms(latency)} "
+                  f"low {[round(v / RATE * 1000) for v in self._lat_low]} "
+                  f"high {[round(v / RATE * 1000) for v in self._lat_high]}", file=sys.stderr)
         e_cut = min(e_cut, seg.frames)
         keep = _without_stalls([(s_cut, e_cut)], stalls, seg.first_frame, env)
         total = sum(b - a for a, b in keep) / RATE

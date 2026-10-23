@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import __version__, net
+from . import __version__, net, tools
 from .model import CancelToken, Episode, ReelcastError, Reporter
 
 FORMATS = {
@@ -24,7 +24,7 @@ def probe(path: Path) -> tuple[float, str]:
     """(duration in seconds, codec of the first audio stream)."""
     p = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            tools.ffprobe(), "-v", "error", "-select_streams", "a:0",
             "-show_entries", "format=duration:stream=codec_name", "-of", "json", str(path),
         ],
         capture_output=True,
@@ -80,7 +80,7 @@ def finalize(
     copy: bool = False,
 ) -> None:
     muxer, _codec, enc_args, cover_ok = FORMATS[fmt]
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src)]
+    cmd = [tools.ffmpeg(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src)]
     cover_file = None
     if cover and cover_ok:
         fd, name = tempfile.mkstemp(prefix="reelcast-cover-", suffix=".jpg")

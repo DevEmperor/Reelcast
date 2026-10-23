@@ -15,7 +15,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .audio import RATE, Capture, CaptureSink
+from .audio import RATE, Capture
+from .backend import CaptureSink, Spotify
 from .model import (
     PHASE_CONNECT,
     PHASE_OPEN,
@@ -27,7 +28,6 @@ from .model import (
     ReelcastError,
     Reporter,
 )
-from .player import Spotify
 
 TICK = 0.2
 END_TOLERANCE = 3.0  # a pause this close to the end counts as "episode finished"
@@ -124,7 +124,7 @@ def record(
             sp.set_position(trackid, 0)
             cancel.sleep(0.3)
 
-            cap = Capture(sink.name, flac_path, on_level=reporter.level)
+            cap = Capture(sink, flac_path, on_level=reporter.level)
             cap.start()
             sp.play()
             if not _wait_status(sp, {"Playing"}, cancel, timeout=8):

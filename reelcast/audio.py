@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import tools
 from .model import ReelcastError
 
 RATE = 48000  # PipeWire graph rate; this way audio is resampled only once (from Spotify's rate)
@@ -144,6 +145,18 @@ class CaptureSink:
     def app_streams(self) -> list[dict]:
         return [si for si in pactl_json("list", "sink-inputs") if _is_app_stream(si)]
 
+    def source_command(self) -> list[str]:
+        """Command that delivers this output's audio as raw float32 stereo PCM on stdout."""
+        return [
+            "pw-record", "--target", self.name,
+            "-P", "stream.capture.sink=true",
+            "-P", "node.description=Reelcast",
+            "--rate", str(RATE), "--channels", str(CHANNELS), "--format", "f32",
+            "--latency", "50ms", "--raw", "-",
+        ]
+
+    on_source_event = None  # pw-record has nothing to report
+
     def watch(self) -> None:
         """Route new streams immediately (pactl subscribe) instead of waiting for the next check."""
         self._watcher = subprocess.Popen(
@@ -240,15 +253,41 @@ class CaptureSink:
         self.moved.clear()
 
 
+def start_source(sink, capture) -> subprocess.Popen:
+    """Start the sink's PCM source; forward its stderr events to the sink (macOS helper)."""
+    cmd = sink.source_command()
+    if not (shutil.which(cmd[0]) or Path(cmd[0]).is_file()):
+        raise ReelcastError(f"Missing program: {cmd[0]}")
+    handler = getattr(sink, "on_source_event", None)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE if handler else subprocess.DEVNULL,
+    )
+    if handler:
+        def read_events() -> None:
+            for raw in proc.stderr:
+                try:
+                    event = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                fatal = handler(event)
+                if fatal:
+                    capture.error = fatal
+
+        threading.Thread(target=read_events, name="source-events", daemon=True).start()
+    return proc
+
+
 class Capture:
     """Records the recording output's monitor and analyses it live."""
 
-    def __init__(self, sink_name: str, flac_path: Path, on_level=None):
-        self.sink_name = sink_name
+    def __init__(self, sink, flac_path: Path, on_level=None):
+        self.sink = sink
         self.flac_path = flac_path
         self.on_level = on_level
         self.lock = threading.Lock()
-        self.frames = 0  # insgesamt geschriebene Frames
+        self.frames = 0  # frames written in total
         self.cut_before = 0  # everything before this is discarded
         self.first_sound: int | None = None
         self.last_sound_end = 0
@@ -260,38 +299,16 @@ class Capture:
         self._thread: threading.Thread | None = None
         self._started = threading.Event()
 
-    # ---- Steuerung --------------------------------------------------------
+    # ---- control ------------------------------------------------------------
 
     def start(self, timeout: float = 5.0) -> None:
-        for tool in ("pw-record", "ffmpeg"):
-            if not shutil.which(tool):
-                raise ReelcastError(f"Missing program: {tool}")
-        self._enc = subprocess.Popen(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "f32le", "-ar", str(RATE), "-ac", str(CHANNELS), "-i", "pipe:0",
-                "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24",
-                "-compression_level", "3", "-f", "flac", str(self.flac_path),
-            ],
-            stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self._rec = subprocess.Popen(
-            [
-                "pw-record", "--target", self.sink_name,
-                "-P", "stream.capture.sink=true",
-                "-P", "node.description=Reelcast",
-                "--rate", str(RATE), "--channels", str(CHANNELS), "--format", "f32",
-                "--latency", "50ms", "--raw", "-",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+        self._enc = _flac_writer(self.flac_path)
+        self._rec = start_source(self.sink, self)
         self._thread = threading.Thread(target=self._pump, name="capture", daemon=True)
         self._thread.start()
         if not self._started.wait(timeout):
             self.stop()
-            raise ReelcastError("Recording doesn't start (pw-record delivers no data).")
+            raise ReelcastError(self.error or "Recording doesn't start (no audio data arrives).")
 
     def stop(self) -> None:
         if self._rec and self._rec.poll() is None:
@@ -422,7 +439,7 @@ ENV_BLOCK = RATE // 100  # envelope in 10 ms blocks
 def _flac_writer(path: Path) -> subprocess.Popen:
     return subprocess.Popen(
         [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            tools.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
             "-f", "f32le", "-ar", str(RATE), "-ac", str(CHANNELS), "-i", "pipe:0",
             "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24",
             "-compression_level", "3", "-f", "flac", str(path),
@@ -497,8 +514,8 @@ class StreamCapture:
     track change is only noticed a moment later.
     """
 
-    def __init__(self, sink_name: str, workdir: Path, on_level=None, preroll: float = 6.0):
-        self.sink_name = sink_name
+    def __init__(self, sink, workdir: Path, on_level=None, preroll: float = 6.0):
+        self.sink = sink
         self.workdir = workdir
         self.on_level = on_level
         self.preroll = int(preroll * RATE)
@@ -513,25 +530,13 @@ class StreamCapture:
         self._started = threading.Event()
 
     def start(self, timeout: float = 5.0) -> None:
-        if not shutil.which("pw-record") or not shutil.which("ffmpeg"):
-            raise ReelcastError("pw-record or ffmpeg is missing.")
         self.workdir.mkdir(parents=True, exist_ok=True)
-        self._rec = subprocess.Popen(
-            [
-                "pw-record", "--target", self.sink_name,
-                "-P", "stream.capture.sink=true",
-                "-P", "node.description=Reelcast",
-                "--rate", str(RATE), "--channels", str(CHANNELS), "--format", "f32",
-                "--latency", "50ms", "--raw", "-",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+        self._rec = start_source(self.sink, self)
         self._thread = threading.Thread(target=self._pump, name="stream-capture", daemon=True)
         self._thread.start()
         if not self._started.wait(timeout):
             self.stop()
-            raise ReelcastError("Recording doesn't start (pw-record delivers no data).")
+            raise ReelcastError(self.error or "Recording doesn't start (no audio data arrives).")
 
     def stop(self) -> None:
         if self._rec and self._rec.poll() is None:

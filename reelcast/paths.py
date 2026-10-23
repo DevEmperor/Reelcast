@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from .model import safe_filename
@@ -41,6 +42,8 @@ def track_path(root: Path, artist: str, album: str, title: str, number: int, dis
 
 def install_icon() -> None:
     """Put the Reelcast icon into the user icon theme (for folders, launcher, window)."""
+    if sys.platform == "darwin":
+        return
     try:
         if not ICON_DST.exists() or ICON_DST.read_bytes() != ICON_SRC.read_bytes():
             ICON_DST.parent.mkdir(parents=True, exist_ok=True)
@@ -62,8 +65,15 @@ def _dot_directory(folder: Path, icon: str) -> None:
 
 def decorate(root: Path, item_dir: Path, cover: bytes | None) -> None:
     """The Reelcast folder gets the cassette icon, show and album folders their cover."""
-    install_icon()
     root.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":  # .directory files are a Linux desktop thing
+        if cover and item_dir != root and not (item_dir / "cover.jpg").exists():
+            try:
+                (item_dir / "cover.jpg").write_bytes(cover)
+            except OSError:
+                pass
+        return
+    install_icon()
     _dot_directory(root, "reelcast")
     if cover and item_dir != root:
         art = item_dir / "cover.jpg"

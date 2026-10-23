@@ -17,7 +17,7 @@ from .model import (
     fmt_duration,
 )
 from .paths import default_out_dir  # noqa: F401  (used by CLI/GUI)
-from .player import Spotify
+from .backend import Spotify
 from .spotify_meta import fetch_episode, parse_episode_id
 
 

@@ -56,7 +56,7 @@ try:
     time.sleep(1.0)
     fake = subprocess.Popen(
         [sys.executable, str(Path(__file__).with_name("fake_spotify.py")), str(work)],
-        env={**os.environ, "FAKE_TARGET": "reelcast_test_dummy"},
+        env={**os.environ, "FAKE_TARGET": "reelcast"},  # like Spotify after its restart: already routed
     )
     fake.wait()
     time.sleep(1.0)
