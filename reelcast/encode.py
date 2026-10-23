@@ -54,10 +54,22 @@ def fetch_cover(url: str) -> bytes | None:
     return None
 
 
+def episode_tags(ep: Episode, source_note: str = "") -> dict[str, str]:
+    return {
+        "title": ep.title,
+        "artist": ep.show,
+        "album_artist": ep.show,
+        "album": ep.show,
+        "date": ep.release,
+        "genre": "Podcast",
+        "comment": f"{ep.url} – {source_note} – Reelcast {__version__}".strip(" –"),
+    }
+
+
 def finalize(
     src: Path,
     dest: Path,
-    ep: Episode,
+    tags: dict[str, str],
     fmt: str,
     quality: int,
     cover: bytes | None,
@@ -66,7 +78,6 @@ def finalize(
     segments: list[tuple[int, int]] | None = None,
     rate: int = 48000,
     copy: bool = False,
-    source_note: str = "",
 ) -> None:
     muxer, _codec, enc_args, cover_ok = FORMATS[fmt]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src)]
@@ -95,15 +106,6 @@ def finalize(
         cmd += ["-map", "1:v", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
         if fmt == "mp3":
             cmd += ["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"]
-    tags = {
-        "title": ep.title,
-        "artist": ep.show,
-        "album_artist": ep.show,
-        "album": ep.show,
-        "date": ep.release,
-        "genre": "Podcast",
-        "comment": f"{ep.url} – {source_note} – Reelcast {__version__}".strip(" –"),
-    }
     for k, v in tags.items():
         if v:
             cmd += ["-metadata", f"{k}={v}"]

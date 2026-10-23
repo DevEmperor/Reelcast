@@ -14,6 +14,8 @@ import os
 import shutil
 import subprocess
 import threading
+from array import array
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,6 +88,9 @@ class CaptureSink:
     name: str = SINK_NAME
     modules: list[str] = field(default_factory=list)
     moved: dict[int, _Moved] = field(default_factory=dict)
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    _watcher: subprocess.Popen | None = None
+    _late_routes: int = 0
 
     # ---- Auf- und Abbau -------------------------------------------------
 
@@ -115,6 +120,8 @@ class CaptureSink:
         return self
 
     def __exit__(self, *exc) -> None:
+        if self._watcher and self._watcher.poll() is None:
+            self._watcher.terminate()
         self.restore()
         for mod in reversed(self.modules):
             _run("pactl", "unload-module", mod, check=False)
@@ -137,11 +144,37 @@ class CaptureSink:
     def app_streams(self) -> list[dict]:
         return [si for si in pactl_json("list", "sink-inputs") if _is_app_stream(si)]
 
+    def watch(self) -> None:
+        """Neue Ströme sofort umleiten (pactl subscribe), statt auf die nächste Prüfung zu warten."""
+        self._watcher = subprocess.Popen(
+            ["pactl", "subscribe"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
+
+        def loop() -> None:
+            for line in self._watcher.stdout:
+                if "'new' on sink-input" in line or "'change' on sink-input" in line:
+                    _, newly = self.route()
+                    if newly:
+                        with self.lock:
+                            self._late_routes += newly
+
+        threading.Thread(target=loop, name="route-watch", daemon=True).start()
+
+    def take_late_routes(self) -> int:
+        """Wie oft der Wächter seit der letzten Abfrage einen Strom umleiten musste."""
+        with self.lock:
+            n, self._late_routes = self._late_routes, 0
+            return n
+
     def route(self) -> tuple[int, int]:
         """Alle Spotify-Ströme auf den Aufnahme-Ausgang legen.
 
         Gibt (Anzahl Ströme, davon neu umgeleitet) zurück.
         """
+        with self.lock:
+            return self._route()
+
+    def _route(self) -> tuple[int, int]:
         sinks = self._sinks()
         streams = self.app_streams()
         newly = 0
@@ -166,8 +199,30 @@ class CaptureSink:
             newly += 1
         return len(streams), newly
 
+    def enforce_full_volume(self) -> bool:
+        """Spotify-Ströme auf dem Aufnahme-Ausgang auf 100 % halten (unverändertes Signal)."""
+        with self.lock:
+            return self._enforce_full_volume()
+
+    def _enforce_full_volume(self) -> bool:
+        changed = False
+        sinks = self._sinks()
+        for si in self.app_streams():
+            if sinks.get(si.get("sink")) != self.name:
+                continue
+            values = [ch.get("value") for ch in si.get("volume", {}).values()]
+            if any(v != 65536 for v in values) or si.get("mute"):
+                _run("pactl", "set-sink-input-volume", str(si["index"]), "65536", check=False)
+                _run("pactl", "set-sink-input-mute", str(si["index"]), "0", check=False)
+                changed = True
+        return changed
+
     def restore(self) -> None:
         """Ströme zurück an ihren alten Platz, alte Lautstärke wieder herstellen."""
+        with self.lock:
+            self._restore()
+
+    def _restore(self) -> None:
         if not self.moved:
             return
         alive = {si["index"]: si for si in pactl_json("list", "sink-inputs")}
@@ -355,3 +410,200 @@ class Capture:
             self.peak_db = 20 * np.log10(peak) if peak > 1e-7 else -120.0
         if self.on_level:
             self.on_level(self.peak_db)
+
+
+# ---------------------------------------------------------------------------
+# Daueraufnahme für den Auto-Mitschnitt
+# ---------------------------------------------------------------------------
+
+ENV_BLOCK = RATE // 100  # Hüllkurve in 10-ms-Blöcken
+
+
+def _flac_writer(path: Path) -> subprocess.Popen:
+    return subprocess.Popen(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "f32le", "-ar", str(RATE), "-ac", str(CHANNELS), "-i", "pipe:0",
+            "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24",
+            "-compression_level", "3", "-f", "flac", str(path),
+        ],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+class Segment:
+    """Ausschnitt der Daueraufnahme (ein Titel plus Rand) als FLAC-Datei.
+
+    `first_frame` ist die absolute Frame-Nummer der ersten Probe in der Datei;
+    `envelope` hält den Spitzenwert jedes 10-ms-Blocks für den Feinschnitt.
+    """
+
+    def __init__(self, path: Path, first_frame: int):
+        self.path = path
+        self.first_frame = first_frame
+        self.end_frame: int | None = None
+        self.frames = 0
+        self.envelope = array("f")
+        self._rest = np.empty(0, dtype=np.float32)
+        self.done = threading.Event()
+        self.error: str | None = None
+        self._enc = _flac_writer(path)
+
+    def write(self, frames: np.ndarray) -> None:
+        if not len(frames) or self.done.is_set():
+            return
+        try:
+            self._enc.stdin.write(frames.tobytes())
+        except (BrokenPipeError, ValueError) as e:
+            self.error = f"FLAC-Encoder: {e}"
+            return
+        amp = np.concatenate([self._rest, np.abs(frames).max(axis=1)])
+        n = len(amp) // ENV_BLOCK
+        if n:
+            self.envelope.extend(amp[: n * ENV_BLOCK].reshape(n, ENV_BLOCK).max(axis=1).tolist())
+        self._rest = amp[n * ENV_BLOCK :]
+        self.frames += len(frames)
+
+    def close(self) -> None:
+        if self.done.is_set():
+            return
+        if self._rest.size:
+            self.envelope.append(float(self._rest.max()))
+            self._rest = np.empty(0, dtype=np.float32)
+        try:
+            self._enc.stdin.close()
+        except (BrokenPipeError, ValueError):
+            pass
+        try:
+            self._enc.wait(30)
+        except subprocess.TimeoutExpired:
+            self._enc.kill()
+        if self._enc.returncode not in (0, None) and not self.error:
+            err = (self._enc.stderr.read() if self._enc.stderr else b"").decode(errors="replace")
+            self.error = f"FLAC-Encoder: {err.strip()[:300]}"
+        self.done.set()
+
+    def discard(self) -> None:
+        self.close()
+        self.path.unlink(missing_ok=True)
+
+
+class StreamCapture:
+    """Nimmt den Aufnahme-Ausgang ohne Unterbrechung auf.
+
+    Ein Ringpuffer hält die letzten Sekunden im Speicher. So kann ein neuer Titel
+    auch dann vollständig ab seinem Anfang (plus Rand) in eine eigene Datei
+    geschrieben werden, wenn der Titelwechsel erst etwas später erkannt wird.
+    """
+
+    def __init__(self, sink_name: str, workdir: Path, on_level=None, preroll: float = 6.0):
+        self.sink_name = sink_name
+        self.workdir = workdir
+        self.on_level = on_level
+        self.preroll = int(preroll * RATE)
+        self.lock = threading.Lock()
+        self.frames = 0
+        self.error: str | None = None
+        self._ring: deque[tuple[int, np.ndarray]] = deque()
+        self._ring_frames = 0
+        self._segments: list[Segment] = []
+        self._rec: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._started = threading.Event()
+
+    def start(self, timeout: float = 5.0) -> None:
+        if not shutil.which("pw-record") or not shutil.which("ffmpeg"):
+            raise ReelcastError("pw-record oder ffmpeg fehlt.")
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self._rec = subprocess.Popen(
+            [
+                "pw-record", "--target", self.sink_name,
+                "-P", "stream.capture.sink=true",
+                "-P", "node.description=Reelcast",
+                "--rate", str(RATE), "--channels", str(CHANNELS), "--format", "f32",
+                "--latency", "50ms", "--raw", "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._thread = threading.Thread(target=self._pump, name="stream-capture", daemon=True)
+        self._thread.start()
+        if not self._started.wait(timeout):
+            self.stop()
+            raise ReelcastError("Aufnahme startet nicht (pw-record liefert keine Daten).")
+
+    def stop(self) -> None:
+        if self._rec and self._rec.poll() is None:
+            self._rec.terminate()
+            try:
+                self._rec.wait(3)
+            except subprocess.TimeoutExpired:
+                self._rec.kill()
+        if self._thread:
+            self._thread.join(5)
+        with self.lock:
+            segs, self._segments = self._segments, []
+        for seg in segs:
+            seg.close()
+
+    def open_segment(self, start_frame: int, name: str) -> Segment:
+        """Neue Datei ab `start_frame` (darf bis zu `preroll` in der Vergangenheit liegen)."""
+        with self.lock:
+            start = max(int(start_frame), self.frames - self._ring_frames, 0)
+            seg = Segment(self.workdir / f"{name}.flac", start)
+            for f0, chunk in self._ring:
+                if f0 + len(chunk) > start:
+                    seg.write(chunk[max(0, start - f0) :])
+            self._segments.append(seg)
+            return seg
+
+    def end_segment(self, seg: Segment, end_frame: int) -> None:
+        """Ab `end_frame` nichts mehr schreiben; die Datei schließt sich dann selbst."""
+        with self.lock:
+            seg.end_frame = max(int(end_frame), seg.first_frame)
+            if seg.first_frame + seg.frames >= seg.end_frame:
+                self._retire(seg)
+
+    def _retire(self, seg: Segment) -> None:
+        if seg in self._segments:
+            self._segments.remove(seg)
+        threading.Thread(target=seg.close, name="segment-close", daemon=True).start()
+
+    def _pump(self) -> None:
+        bytes_per_chunk = CHUNK_FRAMES * CHANNELS * 4
+        stdout = self._rec.stdout
+        buf = b""
+        try:
+            while True:
+                data = stdout.read1(bytes_per_chunk)
+                if not data:
+                    break
+                buf += data
+                usable = len(buf) - len(buf) % (CHANNELS * 4)
+                if not usable:
+                    continue
+                block, buf = buf[:usable], buf[usable:]
+                frames = np.frombuffer(block, dtype="<f4").reshape(-1, CHANNELS).copy()
+                with self.lock:
+                    base = self.frames
+                    for seg in list(self._segments):
+                        n = len(frames)
+                        if seg.end_frame is not None:
+                            n = max(0, min(n, seg.end_frame - base))
+                        seg.write(frames[:n])
+                        if seg.end_frame is not None and base + n >= seg.end_frame:
+                            self._retire(seg)
+                    self._ring.append((base, frames))
+                    self._ring_frames += len(frames)
+                    while self._ring and self._ring_frames - len(self._ring[0][1]) >= self.preroll:
+                        self._ring_frames -= len(self._ring.popleft()[1])
+                    self.frames = base + len(frames)
+                self._started.set()
+                if self.on_level:
+                    peak = float(np.abs(frames).max()) if len(frames) else 0.0
+                    self.on_level(20 * np.log10(peak) if peak > 1e-7 else -120.0)
+        except Exception as e:  # pragma: no cover - nur zur Sicherheit
+            self.error = f"Aufnahmefehler: {e}"
+        finally:
+            self._started.set()

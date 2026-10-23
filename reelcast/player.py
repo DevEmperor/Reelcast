@@ -19,7 +19,8 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 from .model import CancelToken, ReelcastError  # noqa: E402
 
-BUS_NAME = "org.mpris.MediaPlayer2.spotify"
+# Für Tests lässt sich ein anderer MPRIS-Player unterschieben
+BUS_NAME = os.environ.get("REELCAST_MPRIS_NAME", "org.mpris.MediaPlayer2.spotify")
 OBJ_PATH = "/org/mpris/MediaPlayer2"
 PLAYER = "org.mpris.MediaPlayer2.Player"
 ROOT = "org.mpris.MediaPlayer2"
@@ -91,6 +92,20 @@ class Spotify:
         self.bus.call(BUS_NAME, OBJ_PATH, iface, method, args)
 
     # ---- Zustand ------------------------------------------------------------
+
+    def snapshot(self) -> tuple[str, dict, float | None]:
+        """(PlaybackStatus, Metadata, Position in s) mit einem einzigen D-Bus-Aufruf."""
+        try:
+            props = self.bus.call(BUS_NAME, OBJ_PATH, PROPS, "GetAll",
+                                  GLib.Variant("(s)", (PLAYER,)), timeout_ms=3000)[0]
+        except GLib.Error:
+            return "Unknown", {}, None
+        pos = props.get("Position")
+        return (
+            str(props.get("PlaybackStatus", "Unknown")),
+            dict(props.get("Metadata") or {}),
+            pos / 1e6 if isinstance(pos, int) else None,
+        )
 
     def metadata(self) -> dict:
         try:

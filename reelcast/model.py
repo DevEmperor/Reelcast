@@ -44,7 +44,6 @@ class Options:
     overwrite: bool = False
     force: bool = False  # laufende Spotify-Wiedergabe unterbrechen
     show_spotify: bool = False  # selbst gestartetes Spotify nicht minimieren
-    folder_per_show: bool = True
 
 
 @dataclass

@@ -297,7 +297,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ueberschreiben", action="store_true", help="vorhandene Dateien ersetzen")
     p.add_argument("--erzwingen", action="store_true", help="laufende Spotify-Wiedergabe unterbrechen")
     p.add_argument("--spotify-zeigen", action="store_true", help="selbst gestartetes Spotify nicht minimieren")
-    p.add_argument("--ohne-showordner", action="store_true", help="kein Unterordner pro Podcast")
     p.add_argument("--pruefen", action="store_true", help="System prüfen (PipeWire, ffmpeg, Spotify)")
     p.add_argument("--gui", action="store_true", help="grafische Oberfläche starten")
     p.add_argument("--version", action="version", version=f"Reelcast {__version__}")
@@ -345,7 +344,6 @@ def main(argv: list[str] | None = None) -> int:
         overwrite=args.ueberschreiben,
         force=args.erzwingen,
         show_spotify=args.spotify_zeigen,
-        folder_per_show=not args.ohne_showordner,
     )
     return run_jobs(links, opts)
 

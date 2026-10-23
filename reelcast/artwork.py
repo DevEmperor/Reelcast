@@ -33,3 +33,23 @@ def show_artwork_url(show: str) -> str:
             art = r.get("artworkUrl600") or r.get("artworkUrl100") or ""
             return art.replace("100x100bb", "600x600bb")
     return ""
+
+
+def track_artwork_url(artist: str, title: str, album: str) -> str:
+    """Albumcover aus dem Apple-Katalog (nur das Bild)."""
+    if not (artist and (album or title)):
+        return ""
+    url = "https://itunes.apple.com/search?" + urllib.parse.urlencode(
+        {"media": "music", "entity": "song", "limit": 15, "term": f"{artist} {album or title}"}
+    )
+    try:
+        results = net.get_json(url).get("results", [])
+    except Exception:
+        return ""
+    first_artist = artist.split(",")[0]
+    for r in results:
+        if _norm(r.get("artistName", "")).startswith(_norm(first_artist)) and (
+            not album or _norm(r.get("collectionName", "")) == _norm(album)
+        ):
+            return (r.get("artworkUrl100") or "").replace("100x100bb", "600x600bb")
+    return ""

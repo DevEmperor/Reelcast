@@ -105,3 +105,13 @@ def _from_oembed(eid: str) -> Episode:
         release=meta("music:release_date")[:10],
         cover_url=d.get("thumbnail_url", ""),
     )
+
+
+def fetch_track_release(track_id: str) -> str:
+    """Erscheinungsdatum (JJJJ-MM-TT) eines Musiktitels, leer wenn unbekannt."""
+    try:
+        page = net.get_text(f"https://open.spotify.com/embed/track/{track_id}")
+        ent = json.loads(_NEXT.search(page).group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+        return ((ent.get("releaseDate") or {}).get("isoString") or "")[:10]
+    except Exception:
+        return ""
