@@ -1,14 +1,13 @@
-"""Nachgebauter Spotify-Player für Tests (MPRIS über D-Bus + Ton über pw-play).
+"""Fake Spotify player for tests (MPRIS over D-Bus + audio via pw-play).
 
-Spielt eine Abfolge synthetischer „Titel“ (Sinustöne) als *eine* durchgehende
-Tondatei ab und meldet dabei über MPRIS Titel, Position und Status – genau wie
-Spotify. Pausen stehen als Stille in der Tondatei; währenddessen meldet der
-Player „Paused“ und hält die Position an – wie Spotify, das Ton und Position
-gemeinsam anhält.
+Plays a sequence of synthetic "tracks" (sine tones) as *one* continuous audio
+file and reports track, position and status over MPRIS – just like Spotify.
+Pauses are silence in the audio file; meanwhile the player reports "Paused" and
+holds the position – like Spotify, which stops audio and position together.
 
-Aufruf: python3 fake_spotify.py <arbeitsordner>
-Schreibt <arbeitsordner>/erwartet.json mit den Soll-Daten und beendet sich, wenn
-alles gespielt ist.
+Usage: python3 fake_spotify.py <work dir>
+Writes <work dir>/expected.json with the expected results and exits once
+everything has played.
 """
 
 from __future__ import annotations
@@ -32,14 +31,14 @@ BUS = os.environ.get("REELCAST_MPRIS_NAME", "org.mpris.MediaPlayer2.reelcasttest
 APP = "ReelcastFake"
 RATE = 48000
 
-# (Schlüssel, Art, Titel, Länge, Frequenz, gespielt bis, Pausen [(bei, Dauer)], Stille [(von, bis)])
+# (key, kind, title, length, frequency, played until, pauses [(at, duration)], silences [(from, to)])
 PLAN = [
-    ("t1", "track", "Erster Titel", 5.0, 440, 5.0, [], []),
-    ("t2", "track", "Zweiter Titel", 4.0, 660, 4.0, [], [(3.5, 4.0)]),
-    ("t3", "track", "Dritter Titel", 6.0, 880, 6.0, [(2.0, 2.0)], [(3.5, 4.7)]),
-    ("ad", "ad", "Werbung", 3.0, 300, 3.0, [], []),
-    ("t4", "track", "Übersprungen", 5.0, 500, 1.5, [], []),
-    ("t5", "track", "Fünfter Titel", 4.0, 1000, 4.0, [], []),
+    ("t1", "track", "First Track", 5.0, 440, 5.0, [], []),
+    ("t2", "track", "Second Track", 4.0, 660, 4.0, [], [(3.5, 4.0)]),
+    ("t3", "track", "Third Track", 6.0, 880, 6.0, [(2.0, 2.0)], [(3.5, 4.7)]),
+    ("ad", "ad", "Advertisement", 3.0, 300, 3.0, [], []),
+    ("t4", "track", "Skipped Track", 5.0, 500, 1.5, [], []),
+    ("t5", "track", "Fifth Track", 4.0, 1000, 4.0, [], []),
 ]
 
 INTROSPECTION = """
@@ -67,7 +66,7 @@ class Player:
         self.work = work
         self.status = "Stopped"
         self.meta: dict = {}
-        self.track_start = 0.0  # Wanduhr, zu der Position 0 war (ohne Pausen)
+        self.track_start = 0.0  # wall clock time at which the position was 0 (excluding pauses)
         self.paused_at: float | None = None
         self.lock = threading.Lock()
 
@@ -107,7 +106,7 @@ class Player:
     def method_call(self, conn, sender, path, iface, method, params, invocation):
         invocation.return_value(None)
 
-    # ---- Ablauf -----------------------------------------------------------
+    # ---- playback ---------------------------------------------------------
 
     def run(self, loop: GLib.MainLoop) -> None:
         try:
@@ -128,16 +127,16 @@ class Player:
                 expected.append({"title": title, "length": length, "freq": freq, "number": i})
         wav = self.work / "fake.raw"
         np.concatenate(audio).tofile(wav)
-        (self.work / "erwartet.json").write_text(json.dumps(expected, ensure_ascii=False))
+        (self.work / "expected.json").write_text(json.dumps(expected, ensure_ascii=False))
 
-        time.sleep(1.5)  # Reelcast Zeit zum Verbinden geben
+        time.sleep(1.5)  # give Reelcast time to connect
         target = ["--target", os.environ["FAKE_TARGET"]] if os.environ.get("FAKE_TARGET") else []
         proc = subprocess.Popen(
             ["pw-play", *target, "--raw", "--rate", str(RATE), "--channels", "2", "--format", "f32",
              "-P", f"application.name={APP}", "--latency", "50ms", str(wav)],
         )
         t0 = time.monotonic()
-        offset = 0.0  # Startzeit des Titels in der Tondatei
+        offset = 0.0  # start of the track within the audio file
         for i, (key, kind, title, length, freq, played, pauses, silences) in enumerate(PLAN, 1):
             with self.lock:
                 self.track_start = t0 + offset
@@ -147,9 +146,9 @@ class Player:
                     "mpris:trackid": f"/com/spotify/{kind}/{key}fake0000000000000000"[:40],
                     "mpris:length": int(length * 1e6),
                     "xesam:title": title,
-                    "xesam:artist": ["Testband"],
-                    "xesam:albumArtist": ["Testband"],
-                    "xesam:album": "Testalbum",
+                    "xesam:artist": ["Test Band"],
+                    "xesam:albumArtist": ["Test Band"],
+                    "xesam:album": "Test Album",
                     "xesam:trackNumber": i,
                     "xesam:url": f"https://open.spotify.com/{kind}/{key}fake0000000000000000",
                 }
@@ -170,7 +169,7 @@ class Player:
             self.status = "Stopped"
             self.meta = {}
         proc.wait()
-        time.sleep(4.0)  # Reelcast den Rest schreiben lassen
+        time.sleep(4.0)  # let Reelcast write the rest
 
 
 def _sleep_until(t: float) -> None:

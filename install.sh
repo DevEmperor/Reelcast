@@ -1,15 +1,15 @@
 #!/bin/sh
-# Reelcast für den aktuellen Benutzer einrichten: Befehl `reelcast`, Startmenü-Eintrag, Icon.
-# Rückgängig: ./install.sh --entfernen
+# Set up Reelcast for the current user: `reelcast` command, menu entry, icon.
+# Undo with: ./install.sh --remove
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN="$HOME/.local/bin/reelcast"
 APP="$HOME/.local/share/applications/reelcast.desktop"
 ICON="$HOME/.local/share/icons/hicolor/scalable/apps/reelcast.svg"
 
-if [ "${1:-}" = "--entfernen" ]; then
+if [ "${1:-}" = "--remove" ]; then
     rm -f "$BIN" "$APP" "$ICON"
-    echo "Reelcast-Starter entfernt (Aufnahmen bleiben unangetastet)."
+    echo "Removed the Reelcast launcher (recordings are left untouched)."
     exit 0
 fi
 
@@ -24,12 +24,12 @@ cat > "$APP" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Reelcast
-GenericName=Spotify-Mitschnitt
-Comment=Podcasts und Musik von Spotify titelgenau mitschneiden
+GenericName=Spotify Recorder
+Comment=Record podcasts and music from Spotify, track by track
 Exec=$BIN --gui
 Icon=reelcast
 Terminal=false
 Categories=AudioVideo;Audio;Recorder;
 StartupWMClass=reelcast
 EOF
-echo "Eingerichtet: Befehl 'reelcast' und Startmenü-Eintrag 'Reelcast'."
+echo "Done: 'reelcast' command and 'Reelcast' menu entry."

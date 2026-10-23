@@ -18,22 +18,22 @@
       </g>
     </g>
   </defs>
-  <!-- Gehäuse -->
+  <!-- Shell -->
   <rect x="14" y="46" width="228" height="164" rx="24" fill="url(#body)"/>
   <circle cx="30" cy="62" r="4" fill="#45404f"/>
   <circle cx="226" cy="62" r="4" fill="#45404f"/>
-  <!-- Etikett -->
+  <!-- Label -->
   <rect x="30" y="58" width="196" height="104" rx="14" fill="url(#label)"/>
   <rect x="30" y="58" width="196" height="18" rx="9" fill="#ffffff" fill-opacity="0.18"/>
-  <!-- Sichtfenster mit Spulen und eingefangener Welle -->
+  <!-- Window with reels and the captured waveform -->
   <rect x="52" y="88" width="152" height="52" rx="26" fill="#16141b"/>
   <use href="#reel" x="78" y="114"/>
   <use href="#reel" x="178" y="114"/>
   <path d="M101 114 l6 -9 l6 19 l6 -27 l6 33 l6 -24 l6 14 l6 -6 l5 0"
         fill="none" stroke="#ffb000" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- REC-Lampe -->
+  <!-- REC lamp -->
   <circle cx="212" cy="74" r="6" fill="#ff3b30"/>
-  <!-- Bandführung unten -->
+  <!-- Tape guide -->
   <path d="M62 210 l16 -34 h100 l16 34 z" fill="#0e0d12"/>
   <circle cx="98" cy="194" r="5" fill="#2e2a36"/>
   <circle cx="158" cy="194" r="5" fill="#2e2a36"/>

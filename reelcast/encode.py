@@ -1,4 +1,4 @@
-"""Endausgabe mit ffmpeg: schneiden, kodieren, taggen, Cover einbetten."""
+"""Final output with ffmpeg: cut, encode, tag, embed cover art."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from . import __version__, net
 from .model import CancelToken, Episode, ReelcastError, Reporter
 
 FORMATS = {
-    # Endung: (ffmpeg-Muxer, Codec-Name laut ffprobe, Encoder-Argumente, Cover möglich)
+    # extension: (ffmpeg muxer, codec name per ffprobe, encoder arguments, cover supported)
     "mp3": ("mp3", "mp3", lambda q: ["-c:a", "libmp3lame", "-q:a", str(q)], True),
     "m4a": ("ipod", "aac", lambda q: ["-c:a", "aac", "-b:a", "160k"], True),
     "opus": ("ogg", "opus", lambda q: ["-c:a", "libopus", "-b:a", "96k"], False),
@@ -21,7 +21,7 @@ FORMATS = {
 
 
 def probe(path: Path) -> tuple[float, str]:
-    """(Dauer in Sekunden, Codec der ersten Audiospur)."""
+    """(duration in seconds, codec of the first audio stream)."""
     p = subprocess.run(
         [
             "ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -31,7 +31,7 @@ def probe(path: Path) -> tuple[float, str]:
         text=True,
     )
     if p.returncode != 0:
-        raise ReelcastError(f"Datei nicht lesbar: {path.name}")
+        raise ReelcastError(f"Can't read file: {path.name}")
     d = json.loads(p.stdout or "{}")
     codec = (d.get("streams") or [{}])[0].get("codec_name", "")
     return float(d.get("format", {}).get("duration") or 0), codec
@@ -41,7 +41,7 @@ def fetch_cover(url: str) -> bytes | None:
     if not url:
         return None
     urls = [url]
-    if "/image/" in url:  # dieselbe Bild-ID liegt auf mehreren Spotify-CDNs
+    if "/image/" in url:  # the same image ID lives on several Spotify CDNs
         image_id = url.rsplit("/image/", 1)[1]
         urls += [f"https://i.scdn.co/image/{image_id}"]
     for u in urls:

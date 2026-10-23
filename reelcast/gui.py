@@ -1,4 +1,4 @@
-"""Grafische Oberfläche (Qt / PySide6) – gleiche Optik unter Linux und macOS."""
+"""Graphical interface (Qt / PySide6) – same look on Linux and macOS."""
 
 from __future__ import annotations
 
@@ -43,9 +43,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, __version__, artwork, encode
+from . import APP_NAME, __version__, artwork, encode, session as sess
 from .engine import Engine
-from .model import CancelToken, Cancelled, Episode, Options, Reporter, ReelcastError, fmt_duration
+from .model import PHASE_RECORDING, CancelToken, Cancelled, Episode, Options, Reporter, ReelcastError, fmt_duration
 from .paths import ICON_SRC, default_out_dir
 from .session import AutoSession, Entry, SessionReporter
 
@@ -54,7 +54,7 @@ SURFACE = "#1c1922"
 SURFACE2 = "#26222d"
 LINE = "#34303c"
 CREAM = "#f4efe6"
-DIM = "#8a8494"
+DIM = "#a09aaa"
 AMBER = "#ffb000"
 ORANGE = "#ff7a1a"
 REC = "#ff3b30"
@@ -63,7 +63,7 @@ INK = "#1b1408"
 STYLE = f"""
 QWidget {{ background: {BG}; color: {CREAM}; font-size: 13px; }}
 QLabel#dim {{ color: {DIM}; }}
-QLabel#status {{ color: {DIM}; font-size: 12px; }}
+QLabel#status {{ color: {DIM}; font-size: 13px; }}
 QLineEdit {{
     background: {SURFACE}; border: 1px solid {LINE}; border-radius: 10px;
     padding: 9px 12px; selection-background-color: {AMBER}; selection-color: {INK};
@@ -72,7 +72,7 @@ QLineEdit:focus {{ border-color: {AMBER}; }}
 QPushButton {{
     background: {SURFACE2}; border: 1px solid {LINE}; border-radius: 10px; padding: 8px 14px;
 }}
-QPushButton:hover {{ border-color: {AMBER}; }}
+QPushButton:hover, QPushButton:focus {{ border-color: {AMBER}; outline: none; }}
 QPushButton:disabled {{ color: {DIM}; border-color: {SURFACE2}; }}
 QPushButton#primary {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ffc640, stop:1 {ORANGE});
@@ -82,11 +82,14 @@ QPushButton#primary:disabled {{ background: {SURFACE2}; color: {DIM}; }}
 QComboBox {{
     background: {SURFACE2}; border: 1px solid {LINE}; border-radius: 10px; padding: 7px 12px;
 }}
+QComboBox:hover, QComboBox:focus {{ border-color: {AMBER}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
 QComboBox QAbstractItemView {{ background: {SURFACE}; selection-background-color: {AMBER};
     selection-color: {INK}; border: 1px solid {LINE}; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px; border: 1px solid {LINE};
     background: {SURFACE2}; }}
 QCheckBox::indicator:checked {{ background: {AMBER}; border-color: {AMBER}; }}
+QCheckBox:focus {{ outline: none; }}
 QListWidget {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: 14px; padding: 6px;
     outline: 0; }}
 QListWidget::item {{ border: none; border-radius: 8px; }}
@@ -98,19 +101,31 @@ QToolTip {{ background: {SURFACE2}; color: {CREAM}; border: 1px solid {LINE}; }}
 """
 
 
+STATUS_TEXT = {
+    "idle": "Ready",
+    "error": "Something went wrong",
+    sess.WAITING: "Waiting for Spotify…",
+    sess.READY: "Ready – play something in Spotify",
+    sess.RECORDING: "Recording",
+    sess.PAUSED: "Paused",
+    sess.IGNORED: "Not recording this one",
+}
+
+
 # ---------------------------------------------------------------------------
-# Brücke Arbeitsthread → Oberfläche
+# Bridge from the work thread to the UI
 # ---------------------------------------------------------------------------
 
 
 class Bridge(QObject):
-    status = Signal(str)
+    status = Signal(str)  # session state code (session.WAITING, …)
+    phase = Signal(str)  # free text for single-episode phases
     now_playing = Signal(object)
     position = Signal(float, float)
     entry = Signal(object)
     level = Signal(float)
-    message = Signal(str, bool)  # Text, Warnung?
-    finished = Signal(object)  # None oder Fehlermeldung
+    message = Signal(str, bool)  # text, warning?
+    finished = Signal(object)  # None or error message
 
 
 class QtSessionReporter(SessionReporter):
@@ -140,7 +155,7 @@ class QtSessionReporter(SessionReporter):
 
 
 class QtEpisodeReporter(Reporter):
-    """Einzelfolge (Link) auf dieselbe Anzeige abbilden wie den Auto-Modus."""
+    """Map a single episode (link) onto the same display as Auto Record."""
 
     def __init__(self, bridge: Bridge, entry: Entry):
         self.b = bridge
@@ -153,7 +168,10 @@ class QtEpisodeReporter(Reporter):
         self.b.entry.emit(self.e)
 
     def phase(self, text):
-        self.b.status.emit("Nimmt auf" if text.startswith("Nehme auf") else text.rstrip(" …"))
+        if text == PHASE_RECORDING:
+            self.b.status.emit(sess.RECORDING)
+        else:
+            self.b.phase.emit(text)
 
     def progress(self, done, total, unit="s"):
         if unit == "s" and total:
@@ -170,17 +188,18 @@ class QtEpisodeReporter(Reporter):
 
 
 # ---------------------------------------------------------------------------
-# Kassette
+# Cassette
 # ---------------------------------------------------------------------------
 
 
 class Cassette(QWidget):
-    """Gezeichnete Kassette: Cover und Titel auf dem Etikett, Spulen, Welle, REC-Lampe."""
+    """Painted cassette: cover and title on the label, reels, waveform, REC lamp."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.title = "Bereit"
-        self.subtitle = "Spiel in Spotify etwas ab"
+        self.title = "Ready"
+        self.subtitle = "Turn on Auto Record or paste a link"
+        self.elided = False  # for tests: was title or subtitle shortened?
         self.cover: QPixmap | None = None
         self.progress = 0.0
         self.recording = False
@@ -227,9 +246,9 @@ class Cassette(QWidget):
         bw = min(w - 4, (h - 4) * 1.68)
         bh = bw / 1.68
         x0, y0 = (w - bw) / 2, (h - bh) / 2
-        u = bw / 100.0  # Grundeinheit
+        u = bw / 100.0  # base unit
 
-        # Gehäuse
+        # Shell
         body = QRectF(x0, y0, bw, bh)
         g = QLinearGradient(body.topLeft(), body.bottomLeft())
         g.setColorAt(0, QColor("#2e2a36"))
@@ -242,7 +261,7 @@ class Cassette(QWidget):
                        (x0 + 4 * u, y0 + bh - 4 * u), (x0 + bw - 4 * u, y0 + bh - 4 * u)):
             p.drawEllipse(QPointF(cx, cy), 1.1 * u, 1.1 * u)
 
-        # Etikett
+        # Label
         lab = QRectF(x0 + 7 * u, y0 + 6 * u, bw - 14 * u, bh * 0.66)
         lg = QLinearGradient(lab.topLeft(), lab.bottomRight())
         lg.setColorAt(0, QColor("#ffc640"))
@@ -252,7 +271,7 @@ class Cassette(QWidget):
         p.setBrush(QColor(255, 255, 255, 40))
         p.drawRoundedRect(QRectF(lab.x(), lab.y(), lab.width(), 4 * u), 2 * u, 2 * u)
 
-        # Cover + Text
+        # Cover + text
         band_h = lab.height() * 0.40
         cov = QRectF(lab.x() + 3 * u, lab.y() + 3 * u, band_h - 1 * u, band_h - 1 * u)
         path = QPainterPath()
@@ -279,17 +298,19 @@ class Cassette(QWidget):
         p.setFont(f)
         p.setPen(QColor(INK))
         fm = QFontMetrics(f)
-        p.drawText(QRectF(tx, cov.y() + 0.5 * u, tw, fm.height()), Qt.AlignLeft | Qt.AlignVCenter,
-                   fm.elidedText(self.title, Qt.ElideRight, int(tw)))
+        shown_title = fm.elidedText(self.title, Qt.ElideRight, int(tw))
+        p.drawText(QRectF(tx, cov.y() + 0.5 * u, tw, fm.height()), Qt.AlignLeft | Qt.AlignVCenter, shown_title)
         f2 = QFont(self.font())
-        f2.setPixelSize(max(10, int(3.3 * u)))
+        f2.setPixelSize(max(11, int(3.0 * u)))
         p.setFont(f2)
         p.setPen(QColor(27, 20, 8, 190))
         fm2 = QFontMetrics(f2)
+        shown_sub = fm2.elidedText(self.subtitle, Qt.ElideRight, int(tw))
         p.drawText(QRectF(tx, cov.y() + 0.5 * u + fm.height() + 0.8 * u, tw, fm2.height()),
-                   Qt.AlignLeft | Qt.AlignVCenter, fm2.elidedText(self.subtitle, Qt.ElideRight, int(tw)))
+                   Qt.AlignLeft | Qt.AlignVCenter, shown_sub)
+        self.elided = shown_title != self.title or shown_sub != self.subtitle
 
-        # REC-Lampe
+        # REC lamp
         p.setPen(Qt.NoPen)
         lamp = QPointF(lab.right() - 5 * u, lab.y() + 6 * u)
         on = self.recording and not self.paused and int(time.monotonic() * 2) % 2 == 0
@@ -302,7 +323,7 @@ class Cassette(QWidget):
         p.setBrush(QColor(REC) if on else QColor(150, 45, 30) if self.recording else QColor(140, 80, 20))
         p.drawEllipse(lamp, 1.3 * u, 1.3 * u)
 
-        # Sichtfenster
+        # Window
         win_h = lab.height() * 0.42
         win = QRectF(lab.x() + 10 * u, lab.bottom() - win_h - 3.5 * u, lab.width() - 20 * u, win_h)
         p.setBrush(QColor("#16141b"))
@@ -324,7 +345,7 @@ class Cassette(QWidget):
             p.setBrush(tape)
             p.drawEllipse(c, r, r)
 
-        # Welle zwischen den Spulen
+        # Waveform between the reels
         gap_l = left_c.x() + hub_r * 1.4
         gap_r = right_c.x() - hub_r * 1.4
         bars = list(self.levels)
@@ -344,7 +365,7 @@ class Cassette(QWidget):
                               bar_w * 0.3, bar_w * 0.3)
         p.restore()
 
-        # Naben mit Speichen
+        # Hubs with spokes
         for c, direction in ((left_c, 1), (right_c, 1)):
             p.setBrush(QColor(CREAM))
             p.drawEllipse(c, hub_r, hub_r)
@@ -361,7 +382,7 @@ class Cassette(QWidget):
                 p.restore()
             p.restore()
 
-        # Bandführung unten
+        # Tape guide at the bottom
         foot = QPainterPath()
         fy = y0 + bh
         foot.moveTo(x0 + 20 * u, fy)
@@ -378,12 +399,12 @@ class Cassette(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Schalter, Fortschritt, Logbuch
+# Switch, progress, log
 # ---------------------------------------------------------------------------
 
 
 class Toggle(QCheckBox):
-    """Schiebeschalter im Reelcast-Stil."""
+    """Slide switch in Reelcast style."""
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
@@ -450,11 +471,11 @@ class Progress(QWidget):
 
 
 ICONS = {
-    "recording": ("●", REC, "läuft"),
+    "recording": ("●", REC, "recording"),
     "partial": ("◌", DIM, ""),
-    "encoding": ("◔", AMBER, "wird gespeichert …"),
+    "encoding": ("◔", AMBER, "saving…"),
     "saved": ("✓", AMBER, ""),
-    "exists": ("↷", DIM, "schon vorhanden"),
+    "exists": ("↷", DIM, "already saved"),
     "skipped": ("·", DIM, ""),
     "failed": ("✕", REC, ""),
 }
@@ -505,7 +526,7 @@ class LogDelegate(QStyledItemDelegate):
         p.drawText(QRectF(tx, r.y() + 5, tw, 18), Qt.AlignLeft | Qt.AlignVCenter,
                    fmt_.elidedText(e.title, Qt.ElideRight, int(tw)))
         fs = QFont(option.font)
-        fs.setPixelSize(11)
+        fs.setPixelSize(12)
         p.setFont(fs)
         p.setPen(QColor(DIM))
         p.drawText(QRectF(tx, r.y() + 23, tw, 16), Qt.AlignLeft | Qt.AlignVCenter,
@@ -517,8 +538,46 @@ class LogDelegate(QStyledItemDelegate):
         p.restore()
 
 
+class ElidedLabel(QLabel):
+    """Label that shortens its text with "…" instead of cutting it off."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setObjectName("dim")
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt naming)
+        self._full = text
+        self._refresh()
+
+    def text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        super().setText(self.fontMetrics().elidedText(self._full, Qt.ElideMiddle, max(10, self.width())))
+
+
+class LogList(QListWidget):
+    """Log of recorded tracks, with a hint while it is still empty."""
+
+    HINT = "Recorded tracks show up here"
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.count() == 0:
+            p = QPainter(self.viewport())
+            p.setPen(QColor(DIM))
+            p.drawText(self.viewport().rect(), Qt.AlignCenter, self.HINT)
+            p.end()
+
+
 # ---------------------------------------------------------------------------
-# Hauptfenster
+# Main window
 # ---------------------------------------------------------------------------
 
 
@@ -532,6 +591,7 @@ class MainWindow(QMainWindow):
         self.cancel: CancelToken | None = None
         self.worker: threading.Thread | None = None
         self.mode = ""  # "" | "auto" | "link"
+        self.status_code = "idle"
         self.items: dict[int, QListWidgetItem] = {}
         self._cover_for = ""
         self._covers: dict[str, QPixmap] = {}
@@ -542,7 +602,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(22, 18, 22, 18)
         lay.setSpacing(14)
 
-        # Kopf
+        # Header
         head = QHBoxLayout()
         logo = QLabel()
         logo.setPixmap(QIcon(str(ICON_SRC)).pixmap(44, 44))
@@ -557,29 +617,29 @@ class MainWindow(QMainWindow):
         word.setFont(wf)
         word.setStyleSheet(f"color: {AMBER};")
         names.addWidget(word)
-        sub = QLabel("Spotify mitschneiden")
+        sub = QLabel("Record Spotify, track by track")
         sub.setObjectName("dim")
         names.addWidget(sub)
         head.addLayout(names)
         head.addStretch()
-        self.auto = Toggle("Auto-Mitschnitt")
-        self.auto.setToolTip("Alles, was Spotify auf diesem Rechner spielt, titelgenau mitschneiden")
+        self.auto = Toggle("Auto Record")
+        self.auto.setToolTip("Record everything Spotify plays on this computer, one file per track")
         self.auto.toggled.connect(self.on_auto)
         head.addWidget(self.auto)
         lay.addLayout(head)
 
-        # Kassette + Fortschritt
+        # Cassette + progress
         self.cassette = Cassette()
         lay.addWidget(self.cassette, 5)
         self.progress = Progress()
         lay.addWidget(self.progress)
-        self.status = QLabel("Bereit")
+        self.status = QLabel("Ready")
         self.status.setObjectName("status")
         self.status.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.status)
 
-        # Logbuch
-        self.log = QListWidget()
+        # Log
+        self.log = LogList()
         self.log.setItemDelegate(LogDelegate(self.log))
         self.log.setMouseTracking(True)
         self.log.setFocusPolicy(Qt.NoFocus)
@@ -587,32 +647,33 @@ class MainWindow(QMainWindow):
         self.log.setMinimumHeight(150)
         self.log.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self.log.itemDoubleClicked.connect(self.reveal)
-        self.log.setToolTip("Doppelklick zeigt die Datei im Ordner")
+        self.log.setToolTip("Double-click to show the file in its folder")
         lay.addWidget(self.log, 4)
 
-        # Einzelne Folge per Link
+        # Single episode via link
         row = QHBoxLayout()
         self.link = QLineEdit()
-        self.link.setPlaceholderText("Spotify-Folgenlink einfügen … (open.spotify.com/episode/…)")
+        self.link.setPlaceholderText("Paste a Spotify episode link")
+        self.link.setToolTip("For example https://open.spotify.com/episode/…")
         self.link.returnPressed.connect(self.on_link)
         row.addWidget(self.link, 1)
-        self.go = QPushButton("Aufnehmen")
+        self.go = QPushButton("Record")
         self.go.setObjectName("primary")
         self.go.setCursor(Qt.PointingHandCursor)
         self.go.clicked.connect(self.on_link)
         row.addWidget(self.go)
         lay.addLayout(row)
 
-        # Fußzeile
+        # Footer
         foot = QHBoxLayout()
-        self.out_label = QLabel()
-        self.out_label.setObjectName("dim")
-        self.out_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.out_label = ElidedLabel()
         foot.addWidget(self.out_label, 1)
-        choose = QPushButton("Ordner …")
+        choose = QPushButton("Folder…")
+        choose.setToolTip("Choose where recordings are saved")
         choose.clicked.connect(self.choose_dir)
         foot.addWidget(choose)
-        openb = QPushButton("Öffnen")
+        openb = QPushButton("Open")
+        openb.setToolTip("Open the output folder")
         openb.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.out_dir))))
         foot.addWidget(openb)
         self.fmt = QComboBox()
@@ -621,7 +682,8 @@ class MainWindow(QMainWindow):
         self.fmt.setCurrentIndex(max(0, self.fmt.findData(self.settings.value("format", "mp3"))))
         self.fmt.currentIndexChanged.connect(lambda: self.settings.setValue("format", self.fmt.currentData()))
         foot.addWidget(self.fmt)
-        self.listen = QCheckBox("Mithören")
+        self.listen = QCheckBox("Listen")
+        self.listen.setToolTip("Hear what is being recorded through your speakers")
         self.listen.setChecked(self.settings.value("listen", True, type=bool))
         self.listen.toggled.connect(lambda v: self.settings.setValue("listen", v))
         foot.addWidget(self.listen)
@@ -632,6 +694,7 @@ class MainWindow(QMainWindow):
 
         b = self.bridge
         b.status.connect(self.on_status)
+        b.phase.connect(self.on_phase)
         b.now_playing.connect(self.on_now_playing)
         b.position.connect(self.progress.set)
         b.position.connect(self.on_position)
@@ -639,18 +702,20 @@ class MainWindow(QMainWindow):
         b.level.connect(self.cassette.add_level)
         b.message.connect(self.on_message)
         b.finished.connect(self.on_finished)
+        self.setMinimumWidth(640)
         self.resize(720, 860)
+        QTimer.singleShot(0, self.link.setFocus)
 
-    # ---- Einstellungen ------------------------------------------------------
+    # ---- settings -----------------------------------------------------------
 
     def _show_out_dir(self) -> None:
         home = str(Path.home())
         shown = str(self.out_dir).replace(home, "~", 1) if str(self.out_dir).startswith(home) else str(self.out_dir)
-        self.out_label.setText(f"Ziel: {shown}")
+        self.out_label.setText(f"Saving to {shown}")
         self.out_label.setToolTip(str(self.out_dir))
 
     def choose_dir(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Zielordner wählen", str(self.out_dir))
+        d = QFileDialog.getExistingDirectory(self, "Choose output folder", str(self.out_dir))
         if d:
             self.out_dir = Path(d)
             self.settings.setValue("out_dir", d)
@@ -667,7 +732,7 @@ class MainWindow(QMainWindow):
         self.listen.setEnabled(not mode)
         self.auto.setEnabled(mode in ("", "auto"))
 
-    # ---- Starten / Beenden ----------------------------------------------------
+    # ---- start / stop --------------------------------------------------------
 
     def on_auto(self, on: bool) -> None:
         if on and not self.mode:
@@ -676,7 +741,7 @@ class MainWindow(QMainWindow):
             self._run("auto", session.run)
         elif not on and self.mode == "auto" and self.cancel:
             self.cancel.cancel()
-            self.on_status("Beende – speichere noch Offenes …")
+            self.on_phase("Stopping – saving what's left…")
             self.auto.setEnabled(False)
 
     def on_link(self) -> None:
@@ -684,7 +749,7 @@ class MainWindow(QMainWindow):
         if not text or self.mode:
             return
         self.cancel = CancelToken()
-        entry = Entry(-int(time.time() * 1000), "episode", "Folge wird geladen …", text, 0.0)
+        entry = Entry(-int(time.time() * 1000), "episode", "Loading episode…", text, 0.0)
         rep = QtEpisodeReporter(self.bridge, entry)
         engine = Engine(self.options(), rep, self.cancel)
 
@@ -693,9 +758,9 @@ class MainWindow(QMainWindow):
                 res = engine.run(text)
                 entry.path, entry.duration = res.path, res.duration
                 entry.state = "exists" if res.skipped else "saved"
-                entry.reason = "schon vorhanden" if res.skipped else ""
+                entry.reason = "already saved" if res.skipped else ""
             except Cancelled:
-                entry.state, entry.reason = "skipped", "abgebrochen"
+                entry.state, entry.reason = "skipped", "cancelled"
                 raise
             except Exception as e:
                 entry.state, entry.reason = "failed", str(e)
@@ -732,17 +797,22 @@ class MainWindow(QMainWindow):
         self.auto.setChecked(False)
         self.auto.blockSignals(False)
         self.on_now_playing(None)
-        self.on_status("Fehler" if err else "Bereit")
+        self.on_status("error" if err else "idle")
         if err:
             QMessageBox.warning(self, APP_NAME, err)
 
-    # ---- Anzeige ----------------------------------------------------------------
+    # ---- display -----------------------------------------------------------------
 
-    def on_status(self, text: str) -> None:
-        self.status.setText(text)
-        self.cassette.paused = text == "Pausiert"
+    def on_status(self, code: str) -> None:
+        self.status_code = code
+        self.status.setText(STATUS_TEXT.get(code, code))
+        self.cassette.paused = code == sess.PAUSED
         cur = getattr(self, "_current", None)
-        self.cassette.recording = text == "Nimmt auf" and cur is not None and cur.state == "recording"
+        self.cassette.recording = code == sess.RECORDING and cur is not None and cur.state == "recording"
+
+    def on_phase(self, text: str) -> None:
+        self.status_code = "busy"
+        self.status.setText(text)
 
     def on_position(self, pos: float, length: float) -> None:
         self.cassette.progress = pos / length if length else 0.0
@@ -750,8 +820,8 @@ class MainWindow(QMainWindow):
     def on_now_playing(self, entry: Entry | None) -> None:
         self._current = entry
         if entry is None:
-            self.cassette.title = "Bereit"
-            self.cassette.subtitle = "Spiel in Spotify etwas ab" if self.mode == "auto" else "Auto-Mitschnitt einschalten oder Folgenlink einfügen"
+            self.cassette.title = "Ready"
+            self.cassette.subtitle = "Play something in Spotify" if self.mode == "auto" else "Turn on Auto Record or paste a link"
             self.cassette.cover = None
             self.cassette.recording = False
             self.cassette.progress = 0.0
@@ -807,7 +877,7 @@ class MainWindow(QMainWindow):
         item.setToolTip(str(entry.path) if entry.path else entry.reason)
         self.log.viewport().update()
         if entry is getattr(self, "_current", None):
-            self.cassette.recording = entry.state == "recording" and self.status.text() == "Nimmt auf"
+            self.cassette.recording = entry.state == "recording" and self.status_code == sess.RECORDING
 
     def on_message(self, text: str, warning: bool) -> None:
         self.status.setText(("⚠ " if warning else "") + text)
@@ -822,8 +892,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.worker and self.worker.is_alive():
-            if QMessageBox.question(self, APP_NAME, "Es wird gerade aufgenommen. Wirklich beenden?\n"
-                                    "Der laufende Titel wird verworfen.") != QMessageBox.Yes:
+            if QMessageBox.question(self, APP_NAME, "Reelcast is recording. Quit anyway?\n"
+                                    "The track that is playing right now won't be saved.") != QMessageBox.Yes:
                 event.ignore()
                 return
             if self.cancel:

@@ -1,7 +1,7 @@
-"""Cover-Ersatz aus Apple Podcasts.
+"""Fallback cover art from Apple's catalog.
 
-Nur das Bild – die Audiodaten kommen immer von Spotify. Gebraucht, wenn Spotifys
-Bildserver nicht erreichbar sind (z. B. von einem DNS-Filter blockiert).
+Only the image – the audio always comes from Spotify. Used when Spotify's image
+servers can't be reached (e.g. blocked by a DNS filter).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def show_artwork_url(show: str) -> str:
 
 
 def track_artwork_url(artist: str, title: str, album: str) -> str:
-    """Albumcover aus dem Apple-Katalog (nur das Bild)."""
+    """Album cover from Apple's catalog (image only)."""
     if not (artist and (album or title)):
         return ""
     url = "https://itunes.apple.com/search?" + urllib.parse.urlencode(

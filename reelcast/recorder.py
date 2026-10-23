@@ -1,12 +1,12 @@
-"""Aufnahme-Weg: Spotify spielt die Folge, Reelcast nimmt genau diesen Strom auf.
+"""Single-episode recording: Spotify plays the episode, Reelcast records exactly that stream.
 
 Ablauf
-  1. Spotify starten (falls nötig, minimiert) und per MPRIS die Folge öffnen.
-  2. Sofort pausieren, Spotify-Strom auf den virtuellen Ausgang legen, Lautstärke
-     auf 100 % (= unverändertes Signal), an den Anfang springen.
-  3. Aufnahme starten, dann Wiedergabe. Ein Wächter hält Spotify während der
-     ganzen Folge auf dem Aufnahme-Ausgang und erkennt Ende, Pausen, Abbrüche.
-  4. Aufräumen: Strom und Lautstärke zurück, virtuellen Ausgang entfernen.
+  1. Start Spotify (minimized, if needed) and open the episode via MPRIS.
+  2. Pause right away, move Spotify's stream to the virtual output, set volume
+     to 100 % (= unaltered signal), jump to the start.
+  3. Start recording, then playback. A watcher keeps Spotify on the recording
+     output for the whole episode and detects the end, pauses and failures.
+  4. Clean up: stream and volume back, remove the virtual output.
 """
 
 from __future__ import annotations
@@ -16,26 +16,35 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .audio import RATE, Capture, CaptureSink
-from .model import CancelToken, Episode, ReelcastError, Options, Reporter
+from .model import (
+    PHASE_CONNECT,
+    PHASE_OPEN,
+    PHASE_RECORDING,
+    PHASE_START_SPOTIFY,
+    CancelToken,
+    Episode,
+    Options,
+    ReelcastError,
+    Reporter,
+)
 from .player import Spotify
 
 TICK = 0.2
-END_TOLERANCE = 3.0  # so nah am Ende gilt eine Pause als „Folge zu Ende“
+END_TOLERANCE = 3.0  # a pause this close to the end counts as "episode finished"
 NO_SOUND_TIMEOUT = 25.0
-SPEED_WINDOW = 2.5  # Sekunden aufgenommenes Audio pro Tempo-Messung
+SPEED_WINDOW = 2.5  # seconds of recorded audio per speed measurement
 SPEED_TOL = 0.04
 
 
 class SpeedError(ReelcastError):
-    """Spotify spielt nicht mit 1× (Podcast-Tempo)."""
+    """Spotify isn't playing at 1× (podcast speed)."""
 
     def __init__(self, speed: float):
         self.speed = speed
-        shown = f"{speed:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+        shown = f"{speed:.2f}".rstrip("0").rstrip(".")
         super().__init__(
-            f"Spotify spielt diese Folge mit {shown}× statt 1× – die Aufnahme wäre gestaucht. "
-            f"Stell in Spotify das Podcast-Tempo auf 1× (Wiedergabeleiste, Schaltfläche „{shown}x“) "
-            "und starte erneut."
+            f"Spotify plays this episode at {shown}× instead of 1× – the recording would be sped up. "
+            f"Set the podcast speed in Spotify to 1× (playback bar, \"{shown}x\" button) and try again."
         )
 
 
@@ -48,7 +57,7 @@ class Recording:
 
 
 def _open_episode(sp: Spotify, ep: Episode, cancel: CancelToken, timeout: float = 40) -> dict:
-    """Folge öffnen und warten, bis Spotify sie geladen hat."""
+    """Open the episode and wait until Spotify has loaded it."""
     deadline = time.monotonic() + timeout
     next_try = 0.0
     while True:
@@ -58,7 +67,7 @@ def _open_episode(sp: Spotify, ep: Episode, cancel: CancelToken, timeout: float 
             return meta
         if now > deadline:
             raise ReelcastError(
-                "Spotify lädt die Folge nicht. Bist du in Spotify angemeldet und online?"
+                "Spotify doesn't load the episode. Are you logged in to Spotify and online?"
             )
         if now >= next_try:
             try:
@@ -86,28 +95,28 @@ def record(
     cancel: CancelToken,
     flac_path: Path,
 ) -> Recording:
-    reporter.phase("Starte Spotify …" if not sp.running() else "Verbinde mit Spotify …")
+    reporter.phase(PHASE_START_SPOTIFY if not sp.running() else PHASE_CONNECT)
     sp.ensure_running(cancel, minimize=not opts.show_spotify)
 
     if sp.status() == "Playing" and not Spotify.matches(sp.metadata(), ep.id) and not opts.force:
         raise ReelcastError(
-            "Spotify spielt gerade etwas anderes. Erst pausieren – oder mit --erzwingen unterbrechen."
+            "Spotify is playing something else right now. Pause it first – or use --force to interrupt."
         )
 
     old_volume = sp.volume()
-    muted = old_volume is not None and sp.set_volume(0.0)  # kein Ton auf die Lautsprecher beim Laden
+    muted = old_volume is not None and sp.set_volume(0.0)  # no sound on the speakers while loading
     cap: Capture | None = None
     try:
         with CaptureSink(listen=opts.listen) as sink:
-            sink.route()  # ein schon bestehender (pausierter) Spotify-Strom
-            reporter.phase("Öffne Folge in Spotify …")
+            sink.route()  # an already existing (paused) Spotify stream
+            reporter.phase(PHASE_OPEN)
             meta = _open_episode(sp, ep, cancel)
             sp.pause()
             _wait_status(sp, {"Paused", "Stopped"}, cancel)
             trackid = str(meta.get("mpris:trackid", ""))
             expected = (meta.get("mpris:length") or 0) / 1e6 or ep.duration
             if not expected:
-                raise ReelcastError("Spotify meldet keine Länge für diese Folge.")
+                raise ReelcastError("Spotify reports no length for this episode.")
 
             sink.route()
             if muted:
@@ -119,11 +128,11 @@ def record(
             cap.start()
             sp.play()
             if not _wait_status(sp, {"Playing"}, cancel, timeout=8):
-                raise ReelcastError("Spotify startet die Wiedergabe nicht.")
+                raise ReelcastError("Spotify doesn't start playback.")
             sp.release_window()
-            reporter.phase("Nehme auf …")
+            reporter.phase(PHASE_RECORDING)
             _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel)
-            time.sleep(0.4)  # letzte Puffer durch die Leitung lassen
+            time.sleep(0.4)  # let the last buffers pass through
             cap.stop()
             sp.pause()
             if cap.error:
@@ -131,7 +140,7 @@ def record(
             segs = cap.segments(max_seconds=expected + 0.25)
             content = sum(b - a for a, b in segs) / RATE
             if not segs:
-                raise ReelcastError("Die Aufnahme enthält keinen Ton.")
+                raise ReelcastError("The recording contains no sound.")
             return Recording(flac_path, segs, expected, content)
     finally:
         if cap:
@@ -151,9 +160,9 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
     position_checked = False
     paused_since: float | None = None
     warned_pause = warned_silence = False
-    # Spotify meldet sein Podcast-Tempo nicht (MPRIS-Rate bleibt 1.0). Deshalb wird es gemessen:
-    # Fortschritt der Spotify-Position geteilt durch Fortschritt des aufgenommenen Audios.
-    # Beides steht beim Puffern still, das Verhältnis bleibt also auch dann aussagekräftig.
+    # Spotify doesn't report its podcast speed (the MPRIS rate stays 1.0), so it's measured:
+    # progress of Spotify's position divided by progress of the recorded audio.
+    # Both stand still while buffering, so the ratio stays meaningful then too.
     speed_ref: tuple[float, float] | None = None  # (Position, Inhalt)
     speed_strikes = 0
 
@@ -170,13 +179,13 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
 
         if newly:
             if content < 5 and not reseeked:
-                # Spotify hat den Strom erst beim Abspielen neu angelegt → Anfang fehlt; nochmal von vorn
+                # Spotify only created its stream on play → the start is missing; start over
                 cap.mark_restart()
                 sp.set_position(trackid, 0)
                 reseeked = True
                 speed_ref = None
                 continue
-            reporter.warn("Spotify hat seinen Audiostrom neu aufgebaut – wieder umgeleitet.")
+            reporter.warn("Spotify rebuilt its audio stream – routed it again.")
 
         if not position_checked and now - started > 2.0 and status == "Playing":
             position_checked = True
@@ -201,21 +210,21 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
                     speed_strikes = 0
                 elif not 0.3 < speed < 4.0:
                     sp.pause()
-                    raise ReelcastError("Die Position in Spotify wurde während der Aufnahme verändert.")
+                    raise ReelcastError("The position in Spotify was changed during recording.")
                 else:
                     speed_strikes += 1
-                    if speed_strikes >= 2:  # zweimal hintereinander = kein Messfehler
+                    if speed_strikes >= 2:  # twice in a row = not a measurement glitch
                         sp.pause()
                         raise SpeedError(round(speed * 20) / 20)
         elif status != "Playing":
             speed_ref = None
 
         if not Spotify.matches(meta, ep.id):
-            sp.pause()  # nächste Folge/Autoplay: sofort anhalten
+            sp.pause()  # next episode/autoplay: stop right away
             if content < expected - END_TOLERANCE:
                 raise ReelcastError(
-                    "Spotify ist vorzeitig zu einem anderen Titel gewechselt "
-                    f"(nach {content:.0f} von {expected:.0f} s)."
+                    "Spotify switched to something else too early "
+                    f"(after {content:.0f} of {expected:.0f} s)."
                 )
             return
         if content >= expected + 2:
@@ -223,7 +232,7 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
             return
         if status == "Stopped":
             if content < expected - END_TOLERANCE:
-                raise ReelcastError("Spotify hat die Wiedergabe beendet, bevor die Folge zu Ende war.")
+                raise ReelcastError("Spotify stopped playback before the episode was over.")
             return
         if status == "Paused":
             if content >= expected - END_TOLERANCE:
@@ -231,7 +240,7 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
             paused_since = paused_since or now
             if now - paused_since > 2 and not warned_pause:
                 warned_pause = True
-                reporter.warn("Spotify wurde pausiert – die Aufnahme wartet (Lücke wird später entfernt).")
+                reporter.warn("Spotify was paused – recording waits (the gap is removed later).")
             continue
         if paused_since:
             paused_since = None
@@ -241,12 +250,12 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
         if cap.first_sound is None and now - started > NO_SOUND_TIMEOUT:
             if n_streams == 0:
                 raise ReelcastError(
-                    "Spotify spielt, aber nicht auf diesem Rechner – vermutlich ist per Spotify "
-                    "Connect ein anderes Gerät aktiv. In Spotify „Dieser Computer“ wählen."
+                    "Spotify is playing, but not on this computer – probably another device is "
+                    "active via Spotify Connect. Pick \"This computer\" in Spotify."
                 )
-            raise ReelcastError("Spotify spielt, aber es kommt kein Ton an.")
+            raise ReelcastError("Spotify is playing, but no sound arrives.")
         if cap.first_sound is not None and cap.silent_for > 20 and not warned_silence:
             warned_silence = True
-            reporter.warn("Seit 20 s nur Stille – puffert Spotify? Die Aufnahme läuft weiter.")
+            reporter.warn("Only silence for 20 s – is Spotify buffering? Recording continues.")
         elif cap.silent_for < 1:
             warned_silence = False

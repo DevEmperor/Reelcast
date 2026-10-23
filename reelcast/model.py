@@ -1,4 +1,4 @@
-"""Gemeinsame Datentypen: Folge, Optionen, Fortschrittsmeldungen, Abbruch."""
+"""Shared types: episode, options, progress reporting, cancellation."""
 
 from __future__ import annotations
 
@@ -7,13 +7,22 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Phases of a single-episode recording. Front ends compare against these constants,
+# never against display text.
+PHASE_RESOLVE = "Reading episode details…"
+PHASE_START_SPOTIFY = "Starting Spotify…"
+PHASE_CONNECT = "Connecting to Spotify…"
+PHASE_OPEN = "Opening the episode in Spotify…"
+PHASE_RECORDING = "Recording…"
+PHASE_ENCODING = "Encoding…"
+
 
 class Cancelled(Exception):
-    """Der Nutzer hat abgebrochen."""
+    """The user cancelled."""
 
 
 class ReelcastError(Exception):
-    """Fehler mit einer für Menschen gedachten Meldung."""
+    """Error with a message meant for people."""
 
 
 @dataclass
@@ -21,8 +30,8 @@ class Episode:
     id: str
     title: str
     show: str = ""
-    duration: float = 0.0  # Sekunden, 0 = unbekannt
-    release: str = ""  # JJJJ-MM-TT
+    duration: float = 0.0  # seconds, 0 = unknown
+    release: str = ""  # YYYY-MM-DD
     cover_url: str = ""
     playable: bool = True
 
@@ -39,26 +48,26 @@ class Episode:
 class Options:
     out_dir: Path
     fmt: str = "mp3"  # mp3 | m4a | opus | flac
-    quality: int = 2  # LAME-VBR-Stufe 0 (beste) … 9
-    listen: bool = False  # Aufnahme über die Lautsprecher mithören
+    quality: int = 2  # LAME VBR level, 0 (best) … 9
+    listen: bool = False  # hear the recording through the speakers
     overwrite: bool = False
-    force: bool = False  # laufende Spotify-Wiedergabe unterbrechen
-    show_spotify: bool = False  # selbst gestartetes Spotify nicht minimieren
+    force: bool = False  # interrupt whatever Spotify is playing
+    show_spotify: bool = False  # don't minimize a Spotify we started ourselves
 
 
 @dataclass
 class Result:
     path: Path
-    source: str  # "spotify" | "vorhanden"
+    source: str  # "spotify" | "existing"
     duration: float
     skipped: bool = False
     note: str = ""
 
 
 class Reporter:
-    """Rückmeldungen aus dem Ablauf. CLI und GUI überschreiben, was sie brauchen.
+    """Feedback from the work thread. CLI and GUI override what they need.
 
-    Die Methoden werden aus dem Arbeitsthread aufgerufen.
+    The methods are called from the work thread.
     """
 
     def episode(self, ep: Episode) -> None: ...
@@ -70,7 +79,7 @@ class Reporter:
     def warn(self, text: str) -> None: ...
 
     def progress(self, done: float, total: float | None, unit: str = "s") -> None:
-        """unit "s" = Audiosekunden, "B" = Bytes."""
+        """unit "s" = seconds of audio, "B" = bytes."""
 
     def level(self, peak_db: float) -> None: ...
 
@@ -91,7 +100,7 @@ class CancelToken:
             raise Cancelled()
 
     def sleep(self, seconds: float) -> None:
-        """Schlafen, aber sofort bei Abbruch aufwachen."""
+        """Sleep, but wake up immediately on cancel."""
         if self.event.wait(seconds):
             raise Cancelled()
 
@@ -100,7 +109,7 @@ _UNSAFE = re.compile(r'[\\:*?"<>|\x00-\x1f]')
 
 
 def safe_filename(text: str, limit: int = 180) -> str:
-    """Dateiname aus einem Folgentitel; "/" wird zum Gedankenstrich."""
+    """File name from a title; "/" becomes a dash."""
     text = text.replace("/", " - ")
     text = text.replace("„", "").replace("“", "").replace("”", "").replace('"', "")
     text = _UNSAFE.sub("", text)
@@ -108,7 +117,7 @@ def safe_filename(text: str, limit: int = 180) -> str:
     text = re.sub(r"\s+", " ", text).strip(" .-")
     if len(text) > limit:
         text = text[:limit].rstrip(" .-")
-    return text or "Folge"
+    return text or "Untitled"
 
 
 def fmt_duration(seconds: float) -> str:

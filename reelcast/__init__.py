@@ -1,8 +1,7 @@
-"""Reelcast – Podcast-Folgen von Spotify als MP3 mitschneiden.
+"""Reelcast – record podcasts and music from Spotify, track by track.
 
-Spotify spielt die Folge auf einem virtuellen PipeWire-Ausgang ab; Reelcast nimmt
-genau diesen Strom auf (Echtzeit, still im Hintergrund), schneidet, taggt und
-speichert sie als MP3.
+Spotify plays into a virtual PipeWire output; Reelcast records exactly that
+stream (in real time, silently in the background), cuts, tags and saves it.
 """
 
 __version__ = "1.0.0"

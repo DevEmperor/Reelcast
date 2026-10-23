@@ -1,7 +1,7 @@
-"""Ablage: wohin welche Aufnahme kommt, und wie die Ordner aussehen.
+"""Where recordings go and how the folders look.
 
-    <Ziel>/Podcasts/<Show>/<Folgentitel>.mp3
-    <Ziel>/Musik/<Interpret>/<Album>/<Nr> - <Titel>.mp3
+    <target>/Podcasts/<show>/<episode title>.mp3
+    <target>/Music/<artist>/<album>/<no> - <title>.mp3
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def episode_path(root: Path, show: str, title: str, ext: str) -> Path:
 
 
 def track_path(root: Path, artist: str, album: str, title: str, number: int, disc: int, ext: str) -> Path:
-    folder = root / "Musik" / safe_filename(artist or "Unbekannt")
+    folder = root / "Music" / safe_filename(artist or "Unknown Artist")
     if album:
         folder = folder / safe_filename(album)
     prefix = ""
@@ -40,7 +40,7 @@ def track_path(root: Path, artist: str, album: str, title: str, number: int, dis
 
 
 def install_icon() -> None:
-    """Reelcast-Icon ins Benutzer-Icon-Theme legen (für Ordner, Starter, Fenster)."""
+    """Put the Reelcast icon into the user icon theme (for folders, launcher, window)."""
     try:
         if not ICON_DST.exists() or ICON_DST.read_bytes() != ICON_SRC.read_bytes():
             ICON_DST.parent.mkdir(parents=True, exist_ok=True)
@@ -50,7 +50,7 @@ def install_icon() -> None:
 
 
 def _dot_directory(folder: Path, icon: str) -> None:
-    """Ordnersymbol für Dolphin & Co. – vorhandene Einstellungen bleiben unangetastet."""
+    """Folder icon for Dolphin & co. – existing settings are left alone."""
     f = folder / ".directory"
     if f.exists():
         return
@@ -61,7 +61,7 @@ def _dot_directory(folder: Path, icon: str) -> None:
 
 
 def decorate(root: Path, item_dir: Path, cover: bytes | None) -> None:
-    """Reelcast-Ordner bekommt das Kassetten-Icon, Show- und Albumordner ihr Cover."""
+    """The Reelcast folder gets the cassette icon, show and album folders their cover."""
     install_icon()
     root.mkdir(parents=True, exist_ok=True)
     _dot_directory(root, "reelcast")

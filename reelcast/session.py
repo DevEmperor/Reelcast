@@ -1,18 +1,18 @@
-"""Auto-Mitschnitt: alles, was Spotify auf diesem Rechner spielt, titelgenau mitschneiden.
+"""Auto Record: record everything Spotify plays on this computer, track by track.
 
-Reelcast hält Spotify dauerhaft auf dem Aufnahme-Ausgang und nimmt ohne Pause auf.
-Bei jedem Titelwechsel wird die Daueraufnahme geteilt:
+Reelcast keeps Spotify on the recording output and records without a break.
+On every track change the continuous recording is split:
 
-* **Grenzen** kommen aus Spotifys Position: Frame der Aufnahme minus Position ×
-  Abtastrate ergibt, wo im Strom der Titel bei 0:00 lag. Der Mittelwert vieler
-  Messungen ist auf wenige Millisekunden genau. Liegt an der Grenze Stille, wird
-  genau dort geschnitten. Gemessene Abweichungen eichen die Schätzung für
-  lückenlose Übergänge nach.
-* **Pausen und Puffern** erkennt Reelcast daran, dass Spotifys Position steht,
-  während die Aufnahme weiterläuft. Nur diese Stellen werden herausgeschnitten,
-  gewollte Stille in Musikstücken bleibt erhalten.
-* **Gespeichert** wird nur, was vollständig lief: von 0:00 bis zum Ende, ohne
-  Spulen, mit 1× Tempo. Werbung und lokale Dateien werden ignoriert.
+* **Boundaries** come from Spotify's position: recording frame minus position ×
+  sample rate gives where in the stream the track was at 0:00. The median of many
+  measurements is accurate to a few milliseconds. If there's silence at the
+  boundary, the cut goes exactly there. Measured offsets calibrate the estimate
+  for gapless transitions.
+* **Pauses and buffering** are detected by Spotify's position standing still while
+  the recording keeps running. Only those spots are cut out; intended silence in
+  music stays.
+* **Saved** is only what played completely: from 0:00 to the end, no seeking,
+  at 1× speed. Ads and local files are ignored.
 """
 
 from __future__ import annotations
@@ -36,20 +36,27 @@ from .player import Spotify
 from .spotify_meta import fetch_episode, fetch_track_release
 
 TICK = 0.1
-ROUTE_EVERY = 0.5  # Sekunden zwischen Routing-/Lautstärke-Prüfungen
-MARGIN = 2.0  # Rand vor und nach jedem Titel in der Rohdatei
-SEARCH = 0.6  # Suchfenster für den Schnitt in Stille
-START_TOL = 1.5  # so spät darf ein Titel erstmals gesehen werden und gilt als „von vorn“
-END_TOL = 2.5  # so nah am Ende muss der letzte gesehene Stand liegen
+ROUTE_EVERY = 0.5  # seconds between routing/volume checks
+MARGIN = 2.0  # margin before and after each track in the raw file
+SEARCH = 0.6  # search window for cutting in silence
+START_TOL = 1.5  # a track first seen this late still counts as "from the start"
+END_TOL = 2.5  # the last seen position must be this close to the end
 SPEED_TOL = 0.04
 DEBUG = bool(os.environ.get("REELCAST_DEBUG"))
-QUIET = 10 ** (-85 / 20)  # Stille für den Feinschnitt (praktisch digitale Null)
-ZERO = 1e-6  # digitale Null (Pause/Puffern)
+QUIET = 10 ** (-85 / 20)  # silence for fine cutting (practically digital zero)
+ZERO = 1e-6  # digital zero (pause/buffering)
+
+# Session states for front ends – the display text is up to them.
+WAITING = "waiting"  # Spotify isn't running
+READY = "ready"  # nothing is playing
+RECORDING = "recording"
+PAUSED = "paused"
+IGNORED = "ignored"  # something plays that isn't recorded (ad, local file)
 
 
 @dataclass
 class Entry:
-    """Ein Eintrag im Logbuch der Sitzung (für die Anzeige)."""
+    """An entry in the session log (for display)."""
 
     key: int
     kind: str  # track | episode | ad | other
@@ -73,7 +80,7 @@ class SessionReporter(Reporter):
     def position(self, pos: float, length: float) -> None: ...
 
     def entry(self, entry: Entry) -> None:
-        """Neuer oder geänderter Logbuch-Eintrag."""
+        """New or changed log entry."""
 
 
 @dataclass
@@ -136,8 +143,8 @@ class AutoSession:
         self.entries: list[Entry] = []
         self._keys = itertools.count(1)
         self._jobs: queue.Queue = queue.Queue()
-        # Laufzeit Spotify-Position → Aufnahme: jede Titelgrenze mit Stille liefert eine
-        # Unter- bzw. Obergrenze (Frames); daraus wird die Verzögerung geschätzt.
+        # Latency from Spotify's position to the recording: every track boundary with
+        # silence yields a lower or upper bound (frames); the delay is estimated from them.
         self._lat_low: list[float] = []
         self._lat_high: list[float] = []
         self._open_boundary: _Boundary | None = None
@@ -148,8 +155,8 @@ class AutoSession:
     def run(self) -> None:
         prefs = doctor.spotify_prefs()
         if prefs.get("audio.crossfade_v2") == "true":
-            self.rep.warn("Crossfade ist in Spotify an – Übergänge werden überblendet und Titel "
-                          "lassen sich nicht sauber trennen. (Einstellungen → Wiedergabe)")
+            self.rep.warn("Crossfade is on in Spotify – transitions get blended and tracks can't "
+                          "be separated cleanly. (Settings → Playback)")
         sp = Spotify()
         worker = threading.Thread(target=self._encoder, name="encoder", daemon=True)
         worker.start()
@@ -193,17 +200,17 @@ class AutoSession:
                 now = time.monotonic()
                 if not sp.running():
                     if item:
-                        self._finish(item, cap, natural=False, reason="Spotify wurde beendet")
+                        self._finish(item, cap, natural=False, reason="Spotify was closed")
                         item = None
                         self.rep.now_playing(None)
-                    show("Warte auf Spotify …")
+                    show(WAITING)
                     continue
                 if now >= next_route:
                     next_route = now + ROUTE_EVERY
                     sink.route()
                     if sink.enforce_full_volume() and not warned_volume:
                         warned_volume = True
-                        self.rep.info("Spotify bleibt für die Aufnahme auf 100 % – Lautstärke bitte am System regeln.")
+                        self.rep.info("Spotify stays at 100 % while recording – use your system volume instead.")
 
                 status, meta, pos = sp.snapshot()
                 frame = cap.frames
@@ -218,7 +225,7 @@ class AutoSession:
                         self._finish(item, cap, natural=self._at_end(item, now, status))
                         item = None
                         self.rep.now_playing(None)
-                    show("Bereit – spiel etwas in Spotify ab")
+                    show(READY)
                     continue
 
                 restarted = item is not None and tid == item.trackid and pos + 2.0 < item.last_pos
@@ -226,24 +233,24 @@ class AutoSession:
                     if item:
                         self._finish(item, cap, natural=self._at_end(item, now, "Playing"))
                     item = self._begin(meta, tid, pos, frame, now, cap)
-                    show("Nimmt auf" if item.seg else "Ignoriert")
+                    show(RECORDING if item.seg else IGNORED)
                     continue
 
                 self._track(item, status, pos, frame, now)
-                show("Pausiert" if status == "Paused" else ("Nimmt auf" if item.seg else "Ignoriert"))
+                show(PAUSED if status == "Paused" else (RECORDING if item.seg else IGNORED))
                 self.rep.position(pos, item.entry.length)
         except Cancelled:
             pass
         finally:
             if item:
-                self._finish(item, cap, natural=False, reason="Aufnahme beendet")
+                self._finish(item, cap, natural=False, reason="recording stopped")
                 self.rep.now_playing(None)
 
-    # ---- Titel verfolgen -------------------------------------------------------
+    # ---- following tracks -----------------------------------------------------
 
     def _begin(self, meta: dict, tid: str, pos: float, frame: int, now: float, cap: StreamCapture) -> _Item:
         kind = _kind(tid)
-        title = str(meta.get("xesam:title") or "Unbekannt")
+        title = str(meta.get("xesam:title") or "Unknown")
         if kind == "episode":
             subtitle = str(meta.get("xesam:album") or _join(meta.get("xesam:artist")))
         else:
@@ -254,20 +261,20 @@ class AutoSession:
                       art_url=str(meta.get("mpris:artUrl") or ""))
         seg = None
         if kind == "ad":
-            entry.state, entry.reason = "skipped", "Werbung – ignoriert"
+            entry.state, entry.reason = "skipped", "ad – ignored"
         elif kind == "other":
-            entry.state, entry.reason = "skipped", "lokale Datei"
+            entry.state, entry.reason = "skipped", "local file"
         elif not length:
-            entry.state, entry.reason = "skipped", "Spotify meldet keine Länge"
+            entry.state, entry.reason = "skipped", "Spotify reports no length"
         else:
             if pos > START_TOL:
-                entry.state, entry.reason = "partial", "nicht von Anfang an"
-            seg = cap.open_segment(int(frame - (pos + MARGIN) * RATE), f"titel-{entry.key}")
+                entry.state, entry.reason = "partial", "not from the start"
+            seg = cap.open_segment(int(frame - (pos + MARGIN) * RATE), f"track-{entry.key}")
         item = _Item(entry, tid, meta, seg, first_pos=pos, last_pos=pos, last_wall=now, last_frame=frame)
         item.z_runs[0].append(frame - pos * RATE)
         item.prev_boundary, self._open_boundary = self._open_boundary, None
         if item.prev_boundary and pos > START_TOL:
-            item.prev_boundary.set(None)  # kein direkter Übergang
+            item.prev_boundary.set(None)  # not a direct transition
         self.entries.append(entry)
         self.rep.entry(entry)
         self.rep.now_playing(entry)
@@ -280,10 +287,10 @@ class AutoSession:
             if dpos < -0.5 or dpos > dt + 1.0:
                 item.seeked = True
                 if item.entry.state == "recording":
-                    item.entry.state, item.entry.reason = "partial", "gespult"
+                    item.entry.state, item.entry.reason = "partial", "seeked"
                     self.rep.entry(item.entry)
             elif dpos < 0.3 * dt:
-                if item.stall_open is None:  # Puffern: Position steht, Aufnahme läuft
+                if item.stall_open is None:  # buffering: position stands, recording runs
                     item.stall_open = item.last_frame
             else:
                 if item.stall_open is not None:
@@ -299,9 +306,9 @@ class AutoSession:
                     ratio = item.advanced / item.played
                     if abs(ratio - 1.0) > SPEED_TOL:
                         item.speed = ratio
-                        shown = f"{round(ratio * 20) / 20:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+                        shown = f"{round(ratio * 20) / 20:.2f}".rstrip("0").rstrip(".")
                         if item.entry.state == "recording":
-                            item.entry.state, item.entry.reason = "partial", f"Tempo {shown}×"
+                            item.entry.state, item.entry.reason = "partial", f"speed {shown}×"
                             self.rep.entry(item.entry)
                     else:
                         item.speed = 1.0
@@ -312,7 +319,7 @@ class AutoSession:
         item.last_pos, item.last_wall, item.last_frame = pos, now, frame
 
     def _restart(self, sp: Spotify, item: _Item, cap: StreamCapture) -> bool:
-        """Spotify-Strom kam erst nach Titelbeginn an → Anfang fehlt: einmal von vorn."""
+        """Spotify's stream arrived only after the track began → start missing: restart once."""
         if item.seg is None or item.entry.state != "recording" or item.last_pos > 3.0:
             return False
         sp.set_position(item.trackid, 0)
@@ -321,7 +328,7 @@ class AutoSession:
         item.entry.state = "dropped"
         self.entries.remove(item.entry)
         self.rep.entry(item.entry)
-        self.rep.info("Spotify-Ton kam einen Moment zu spät an – Titel wurde kurz an den Anfang gesetzt.")
+        self.rep.info("Spotify's audio arrived a moment late – jumped back to the start of the track.")
         return True
 
     def _at_end(self, item: _Item, now: float, status: str) -> bool:
@@ -343,7 +350,7 @@ class AutoSession:
             item.stall_open = None
         entry = item.entry
         if entry.state == "recording" and not natural:
-            entry.state, entry.reason = "partial", reason or "übersprungen"
+            entry.state, entry.reason = "partial", reason or "skipped"
         if entry.state != "recording":
             if boundary:
                 boundary.set(None)
@@ -357,7 +364,7 @@ class AutoSession:
         tail = next((run for run in reversed(item.z_runs) if run), head)
         start = statistics.median(head)
         end = statistics.median(tail) + entry.length * RATE
-        # Länge jeder Pause exakt aus dem Sprung der Schätzung davor/danach
+        # exact length of every pause from the jump of the estimate before/after it
         meds = [statistics.median(r) if r else None for r in item.z_runs]
         stalls = []
         for i, (a, b) in enumerate(item.stalls):
@@ -372,7 +379,7 @@ class AutoSession:
         self.rep.entry(entry)
         self._jobs.put((item, start, end, stalls, boundary))
 
-    # ---- Schneiden und Speichern (eigener Thread) ---------------------------
+    # ---- cutting and saving (own thread) ----------------------------------------
 
     def _encoder(self) -> None:
         while True:
@@ -393,7 +400,7 @@ class AutoSession:
         seg.done.wait()
         if boundary:
             boundary.ready.wait(3.0)
-            # Lückenloser Übergang: der Anfang des Folgetitels ist das genauere Ende
+            # Gapless transition: the start of the next track is the more precise end
             if boundary.z is not None and abs(boundary.z - end) < 0.5 * RATE:
                 end = boundary.z
         entry = item.entry
@@ -420,11 +427,11 @@ class AutoSession:
         keep = _without_stalls([(s_cut, e_cut)], stalls, seg.first_frame, env)
         total = sum(b - a for a, b in keep) / RATE
         if total < entry.length - 3:
-            raise RuntimeError(f"Aufnahme zu kurz ({fmt_duration(total)} von {fmt_duration(entry.length)})")
+            raise RuntimeError(f"recording too short ({fmt_duration(total)} of {fmt_duration(entry.length)})")
 
         tags, dest, cover_url, extra_cover = self._describe(item)
         if dest.exists() and not self.opts.overwrite:
-            entry.state, entry.path, entry.reason = "exists", dest, "schon vorhanden"
+            entry.state, entry.path, entry.reason = "exists", dest, "already saved"
             seg.path.unlink(missing_ok=True)
             self.rep.entry(entry)
             return
@@ -440,7 +447,7 @@ class AutoSession:
     def _describe(self, item: _Item):
         meta, entry, ext = item.meta, item.entry, self.opts.fmt
         root = self.opts.out_dir
-        note = f"Spotify-Mitschnitt – Reelcast {__version__}"
+        note = f"Recorded from Spotify – Reelcast {__version__}"
         if entry.kind == "episode":
             ep_id = _item_id(meta)
             try:
@@ -475,15 +482,15 @@ class AutoSession:
 
 
 def _refine(env, est: float) -> tuple[int, bool]:
-    """Schnittpunkt an einer Titelgrenze festlegen.
+    """Decide the cut point at a track boundary.
 
-    Liegt die Schätzung in Stille, bleibt sie, wie sie ist: davor und danach ist
-    Stille, die Länge des Titels bleibt exakt. Liegt sie im Ton, aber nahe an
-    Stille, ist die Schätzung dort ungenau – dann wird an die nächste Kante
-    zwischen Ton und Stille geschnitten. Ohne Stille in der Nähe (lückenlose
-    Übergänge) gilt die Schätzung.
+    If the estimate lies in silence, it stays as it is: there's silence on both
+    sides and the track length stays exact. If it lies in sound but close to
+    silence, the estimate is off there – then the cut moves to the nearest edge
+    between sound and silence. Without silence nearby (gapless transitions) the
+    estimate is used.
 
-    Gibt (Frame, ob an eine Kante verschoben wurde) zurück.
+    Returns (frame, whether it was moved to an edge).
     """
     n = len(env)
     b = int(est // ENV_BLOCK)
@@ -502,11 +509,11 @@ def _refine(env, est: float) -> tuple[int, bool]:
 
 
 def _bounds(env, z: float) -> tuple[float | None, float | None]:
-    """Grenzen für die Laufzeit aus der Stille an einer Titelgrenze.
+    """Bounds on the latency from the silence at a track boundary.
 
-    `z` ist die Grenze laut Spotify-Position (ohne Laufzeit). Der letzte Ton vor
-    der Stille liegt höchstens bei der echten Grenze (→ Untergrenze), der erste
-    Ton danach mindestens dort (→ Obergrenze).
+    `z` is the boundary according to Spotify's position (without latency). The last
+    sound before the silence lies at most at the true boundary (→ lower bound), the
+    first sound after it at least there (→ upper bound).
     """
     n = len(env)
     lo = int((z - 0.3 * RATE) // ENV_BLOCK)
@@ -535,7 +542,7 @@ def _bounds(env, z: float) -> tuple[float | None, float | None]:
 
 
 def _estimate_latency(lows: list[float], highs: list[float]) -> float:
-    """Laufzeit, die die meisten gemessenen Grenzen erfüllt (robust gegen Ausreißer)."""
+    """Latency that satisfies most measured bounds (robust against outliers)."""
     if not lows and not highs:
         return 0.0
     tol = 0.005 * RATE
@@ -546,7 +553,7 @@ def _estimate_latency(lows: list[float], highs: list[float]) -> float:
     for v in highs:
         score += grid <= v + tol
     best = np.flatnonzero(score == score.max())
-    # größten zusammenhängenden Bereich nehmen
+    # take the largest contiguous range
     runs, cur = [], [best[0]]
     for i in best[1:]:
         if i == cur[-1] + 1:
@@ -557,8 +564,8 @@ def _estimate_latency(lows: list[float], highs: list[float]) -> float:
     runs.append(cur)
     run = max(runs, key=len)
     a, b = grid[run[0]], grid[run[-1]]
-    # Ein Bereich, der bis an den Rand des Suchrasters reicht, ist dort nicht durch eine
-    # Messung begrenzt – dann zählt nur die gemessene Seite.
+    # A range that reaches the edge of the search grid isn't bounded by a measurement
+    # there – then only the measured side counts.
     open_low, open_high = run[0] == 0, run[-1] == len(grid) - 1
     if open_low and not open_high:
         return float(b)
@@ -568,14 +575,14 @@ def _estimate_latency(lows: list[float], highs: list[float]) -> float:
 
 
 def _without_stalls(keep, stalls, first_frame, env) -> list[tuple[int, int]]:
-    """Pausen/Puffer-Stellen herausschneiden – nur dort, wo wirklich digitale Null liegt."""
+    """Cut out pause/buffering spots – only where there really is digital zero."""
     out = list(keep)
     for a_abs, b_abs, want in stalls:
         a, b = a_abs - first_frame, b_abs - first_frame
         want = int(want)
         if want < RATE // 5:
             continue
-        # digitale Null rund um die Pause suchen
+        # look for digital zero around the pause
         ba, bb = max(0, a // ENV_BLOCK - 20), min(len(env), b // ENV_BLOCK + 20)
         best = None
         i = ba

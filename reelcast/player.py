@@ -1,6 +1,6 @@
-"""Spotify-Desktop über MPRIS (D-Bus) fernsteuern – keine Klicks, kein Fenster nötig.
+"""Remote-control Spotify desktop via MPRIS (D-Bus) – no clicks, no window needed.
 
-D-Bus läuft über GIO (PyGObject), das auf jedem GNOME/KDE-System ohnehin da ist.
+D-Bus goes through GIO (PyGObject), which every GNOME/KDE system has anyway.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 from .model import CancelToken, ReelcastError  # noqa: E402
 
-# Für Tests lässt sich ein anderer MPRIS-Player unterschieben
+# Tests can substitute a different MPRIS player
 BUS_NAME = os.environ.get("REELCAST_MPRIS_NAME", "org.mpris.MediaPlayer2.spotify")
 OBJ_PATH = "/org/mpris/MediaPlayer2"
 PLAYER = "org.mpris.MediaPlayer2.Player"
@@ -29,13 +29,13 @@ FLATPAK_ID = "com.spotify.Client"
 
 
 class Bus:
-    """Dünne, synchrone Hülle um die Session-Bus-Verbindung (threadsicher)."""
+    """Thin, synchronous wrapper around the session bus connection (thread-safe)."""
 
     def __init__(self) -> None:
         try:
             self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         except GLib.Error as e:
-            raise ReelcastError(f"Keine Verbindung zum D-Bus: {e.message}") from e
+            raise ReelcastError(f"No connection to D-Bus: {e.message}") from e
 
     def call(self, dest: str, path: str, iface: str, method: str, args: GLib.Variant | None = None,
              timeout_ms: int = 10000):
@@ -94,7 +94,7 @@ class Spotify:
     # ---- Zustand ------------------------------------------------------------
 
     def snapshot(self) -> tuple[str, dict, float | None]:
-        """(PlaybackStatus, Metadata, Position in s) mit einem einzigen D-Bus-Aufruf."""
+        """(PlaybackStatus, Metadata, position in s) with a single D-Bus call."""
         try:
             props = self.bus.call(BUS_NAME, OBJ_PATH, PROPS, "GetAll",
                                   GLib.Variant("(s)", (PLAYER,)), timeout_ms=3000)[0]
@@ -177,11 +177,11 @@ class Spotify:
         cmd = spotify_command()
         if not cmd:
             raise ReelcastError(
-                "Spotify ist nicht installiert (weder Flatpak com.spotify.Client noch 'spotify')."
+                "Spotify isn't installed (neither the Flatpak com.spotify.Client nor 'spotify')."
             )
         if minimize:
-            # bleibt aktiv, bis die Wiedergabe läuft (release_window), damit auch ein spät
-            # erscheinendes Fenster erfasst wird
+            # stays active until playback runs (release_window), so a window that
+            # appears late is caught as well
             self._hider = KWinHider(self.bus)
             self._hider.start()
         self._proc = subprocess.Popen(
@@ -195,9 +195,9 @@ class Spotify:
         deadline = time.monotonic() + timeout
         while not self.running():
             if time.monotonic() > deadline:
-                raise ReelcastError("Spotify hat sich nicht am D-Bus gemeldet (Zeitüberschreitung).")
+                raise ReelcastError("Spotify didn't show up on D-Bus (timed out).")
             cancel.sleep(0.3)
-        cancel.sleep(1.5)  # MPRIS ist da, der Client braucht noch einen Moment
+        cancel.sleep(1.5)  # MPRIS is up; the client needs another moment
 
     def release_window(self) -> None:
         if self._hider:
@@ -205,7 +205,7 @@ class Spotify:
             self._hider = None
 
     def quit(self) -> None:
-        """Nur ein selbst gestartetes Spotify wieder schließen."""
+        """Close Spotify again – only if we started it."""
         self.release_window()
         if not self.launched_by_us:
             return
@@ -222,7 +222,7 @@ class Spotify:
 
 
 class KWinHider:
-    """Minimiert das Spotify-Fenster unter KDE Plasma per KWin-Skript (best effort)."""
+    """Minimizes the Spotify window on KDE Plasma via a KWin script (best effort)."""
 
     SCRIPT = """
 function hide(w) {

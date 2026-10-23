@@ -1,9 +1,8 @@
-"""Ende-zu-Ende-Test des Auto-Mitschnitts gegen den nachgebauten Spotify-Player.
+"""End-to-end test of Auto Record against the fake Spotify player.
 
-Prüft: Anzahl der gespeicherten Titel, Länge auf ±30 ms, kein Übersprechen des
-Nachbartitels an den Rändern, Pause entfernt, gewollte Stille erhalten,
-Werbung und übersprungener Titel verworfen. Nichts davon ist auf den
-Lautsprechern zu hören (der Player spielt auf einen stummen Hilfsausgang).
+Checks: number of saved tracks, length within ±30 ms, no bleed from neighbouring
+tracks at the edges, pause removed, intended silence kept, ad and skipped track
+discarded. None of it is audible (the player plays into a silent helper output).
 """
 
 import json
@@ -66,9 +65,9 @@ try:
 finally:
     subprocess.run(["pactl", "unload-module", dummy])
 
-expected = json.loads((work / "erwartet.json").read_text())
+expected = json.loads((work / "expected.json").read_text())
 saved = [e for e in session.entries if e.state == "saved"]
-print("\nGespeichert:", len(saved), "erwartet:", len(expected))
+print("\nSaved:", len(saved), "expected:", len(expected))
 ok = len(saved) == len(expected)
 
 
@@ -86,9 +85,9 @@ def freq(x):
 
 
 for exp in expected:
-    p = paths.track_path(out, "Testband", "Testalbum", exp["title"], exp["number"], 0, fmt)
+    p = paths.track_path(out, "Test Band", "Test Album", exp["title"], exp["number"], 0, fmt)
     if not p.exists():
-        print("FEHLT", p.name)
+        print("MISSING", p.name)
         ok = False
         continue
     x = decode(p)
@@ -99,13 +98,13 @@ for exp in expected:
     zeros = np.abs(x) < 1e-6
     longest = 0
     run = 0
-    for z in zeros[::48]:  # 1-ms-Raster
+    for z in zeros[::48]:  # 1 ms grid
         run = run + 1 if z else 0
         longest = max(longest, run)
     fh, ft = freq(head), freq(tail)
     good = abs(dur - exp["length"]) <= 0.03 and abs(fh - exp["freq"]) <= 15 and abs(ft - exp["freq"]) <= 15
-    print(f"{'OK ' if good else 'XX '} {p.name:28} {dur:7.3f}s (soll {exp['length']:.3f})  "
-          f"Anfang {fh} Hz, Ende {ft} Hz (soll {exp['freq']}), längste Stille {longest / 1000:.2f}s")
+    print(f"{'OK ' if good else 'XX '} {p.name:28} {dur:7.3f}s (want {exp['length']:.3f})  "
+          f"start {fh} Hz, end {ft} Hz (want {exp['freq']}), longest silence {longest / 1000:.2f}s")
     ok &= good
-print("\nERGEBNIS:", "BESTANDEN" if ok else "FEHLGESCHLAGEN")
-print("Reste:", sorted(str(q.relative_to(out)) for q in out.rglob("*") if q.is_file()))
+print("\nRESULT:", "PASSED" if ok else "FAILED")
+print("Files:", sorted(str(q.relative_to(out)) for q in out.rglob("*") if q.is_file()))

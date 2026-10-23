@@ -1,4 +1,4 @@
-"""Systemcheck: ist alles da, und welche Spotify-Einstellungen beeinflussen die Aufnahme?"""
+"""System check: is everything there, and which Spotify settings affect recording?"""
 
 from __future__ import annotations
 
@@ -42,39 +42,39 @@ def checks() -> list[tuple[str, str, str]]:
     if "PipeWire" in info:
         res.append((OK, "PipeWire", info.split("Server Name:", 1)[1].splitlines()[0].strip()))
     elif info:
-        res.append((WARN, "Audio-Server", "kein PipeWire – Aufnahme ungetestet"))
+        res.append((WARN, "Audio server", "not PipeWire – recording is untested"))
     else:
-        res.append((FAIL, "Audio-Server", "pactl fehlt oder kein Server erreichbar"))
+        res.append((FAIL, "Audio server", "pactl missing or no server reachable"))
     for tool in ("pw-record", "pw-metadata", "ffmpeg", "ffprobe"):
-        res.append((OK if shutil.which(tool) else FAIL, tool, shutil.which(tool) or "fehlt"))
+        res.append((OK if shutil.which(tool) else FAIL, tool, shutil.which(tool) or "missing"))
     if shutil.which("ffmpeg"):
         enc = _out("ffmpeg", "-hide_banner", "-encoders")
-        res.append((OK if "libmp3lame" in enc else FAIL, "MP3-Encoder", "libmp3lame" if "libmp3lame" in enc else "fehlt"))
+        res.append((OK if "libmp3lame" in enc else FAIL, "MP3 encoder", "libmp3lame" if "libmp3lame" in enc else "missing"))
 
     cmd = spotify_command()
-    res.append((OK if cmd else FAIL, "Spotify", " ".join(cmd) if cmd else "nicht installiert"))
+    res.append((OK if cmd else FAIL, "Spotify", " ".join(cmd) if cmd else "not installed"))
     prefs = spotify_prefs()
     if prefs.get("audio.crossfade_v2") == "true":
-        res.append((WARN, "Spotify: Crossfade", "an – kann das Folgenende überblenden (Einstellungen → Wiedergabe)"))
+        res.append((WARN, "Spotify: Crossfade", "on – blends into the next track (Settings → Playback)"))
     else:
-        res.append((OK, "Spotify: Crossfade", "aus"))
+        res.append((OK, "Spotify: Crossfade", "off"))
     if prefs.get("audio.normalize_v2", "true") != "false":
-        res.append((WARN, "Spotify: Lautstärke normalisieren", "an – verändert den Pegel leicht (für Sprache unkritisch)"))
-    quality = {"0": "automatisch", "1": "niedrig", "2": "normal", "3": "hoch", "4": "sehr hoch"}
+        res.append((WARN, "Spotify: Normalize volume", "on – changes the level slightly (fine for speech)"))
+    quality = {"0": "automatic", "1": "low", "2": "normal", "3": "high", "4": "very high"}
     q = prefs.get("audio.play_bitrate_enumeration")
     res.append(
-        (OK if q in ("3", "4") else WARN, "Spotify: Streamingqualität",
-         quality.get(q, "automatisch") + ("" if q in ("3", "4") else " – „Sehr hoch“ empfohlen"))
+        (OK if q in ("3", "4") else WARN, "Spotify: Streaming quality",
+         quality.get(q, "automatic") + ("" if q in ("3", "4") else " – \"Very high\" recommended"))
     )
     kde = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
-    res.append((OK if kde else WARN, "Spotify minimieren", "per KWin-Skript" if kde else "nur unter KDE Plasma"))
+    res.append((OK if kde else WARN, "Minimize Spotify", "via KWin script" if kde else "KDE Plasma only"))
     return res
 
 
 def print_report(console) -> int:
     from rich.table import Table
 
-    t = Table(title="Reelcast – Systemcheck", show_header=False, box=None, padding=(0, 1))
+    t = Table(title="Reelcast – System check", show_header=False, box=None, padding=(0, 1))
     icon = {OK: "[green]✓[/]", WARN: "[yellow]![/]", FAIL: "[red]✗[/]"}
     worst = OK
     for state, name, detail in checks():

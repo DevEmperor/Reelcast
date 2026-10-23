@@ -1,72 +1,72 @@
 # Reelcast
 
-Podcasts und Musik von Spotify titelgenau mitschneiden – unter Linux (PipeWire),
-macOS in Arbeit.
+Record podcasts and music from Spotify, track by track – on Linux (PipeWire),
+with macOS in progress.
 
-Spotify spielt auf einem eigenen, virtuellen Ausgang. Reelcast nimmt genau diesen
-Strom auf, ohne Umweg über Lautsprecher oder Mikrofon. Andere Programme und
-Systemklänge landen nie in der Aufnahme. Nichts wird entschlüsselt oder umgangen:
-aufgenommen wird, was Spotify ohnehin abspielt.
+Spotify plays into its own virtual output, and Reelcast records exactly that
+stream – no detour through speakers or a microphone. Other apps and system
+sounds never end up in a recording. Nothing is decrypted or bypassed: Reelcast
+records what Spotify plays anyway.
 
-## Zwei Arten aufzunehmen
+## Two ways to record
 
-**Auto-Mitschnitt** – Reelcast läuft im Hintergrund und schneidet alles mit, was
-du in Spotify auf diesem Rechner abspielst. Jeder Titel wird eine eigene Datei.
+**Auto Record** – Reelcast runs in the background and records everything you
+play in Spotify on this computer. Every track becomes its own file.
 
-- Die Schnitte kommen aus Spotifys Position und sitzen auf wenige Millisekunden
-  genau. Liegt an der Grenze Stille, wird genau dort geschnitten.
-- Pausen und Puffern werden entfernt. Gewollte Stille in Stücken bleibt erhalten.
-- Gespeichert wird nur, was vollständig lief. Übersprungene oder gespulte Titel,
-  Werbung und lokale Dateien werden verworfen.
-- Podcasts müssen in Spotify mit **1×** laufen. Andere Tempi werden erkannt und
-  nicht gespeichert.
+- Cuts come from Spotify's playback position and land within a few
+  milliseconds. If there's silence at a boundary, the cut goes right there.
+- Pauses and buffering are removed; intended silence inside a track stays.
+- Only complete tracks are saved. Skipped or seeked tracks, ads and local
+  files are discarded.
+- Podcasts have to play at **1×** in Spotify. Other speeds are detected and
+  not saved.
 
-**Einzelne Folge** – Spotify-Folgenlink angeben. Reelcast startet Spotify bei
-Bedarf (minimiert), spielt die Folge stumm ab, nimmt sie auf und räumt danach auf.
+**Single episode** – give Reelcast a Spotify episode link. It starts Spotify if
+needed (minimized), plays the episode silently, records it and cleans up.
 
-## Bedienen
+## Usage
 
 ```bash
-reelcast --gui                                  # Oberfläche
-reelcast --auto                                 # Auto-Mitschnitt im Terminal (Strg+C beendet)
-reelcast 'https://open.spotify.com/episode/…'   # einzelne Folge
-reelcast --pruefen                              # Systemcheck
+reelcast --gui                                  # graphical interface
+reelcast --auto                                 # Auto Record in the terminal (Ctrl+C stops)
+reelcast 'https://open.spotify.com/episode/…'   # single episode
+reelcast --check                                # system check
 ```
 
-Ohne Einrichtung geht es auch mit `python3 -m reelcast …` im Projektordner.
-`./install.sh` legt den Befehl `reelcast` und einen Startmenü-Eintrag an,
-`./install.sh --entfernen` nimmt beides wieder weg.
+Without installing, `python3 -m reelcast …` works from the project folder.
+`./install.sh` adds the `reelcast` command and a menu entry,
+`./install.sh --remove` takes both away again.
 
-## Ablage
+## Where recordings go
 
 ```
 ~/Music/Reelcast/
-├── Musik/<Interpret>/<Album>/01 - <Titel>.mp3
-└── Podcasts/<Show>/<Folgentitel>.mp3
+├── Music/<artist>/<album>/01 - <title>.mp3
+└── Podcasts/<show>/<episode title>.mp3
 ```
 
-Mit Tags (Titel, Interpret, Album, Tracknummer, Datum) und Cover. Der
-Reelcast-Ordner bekommt das Kassetten-Icon, Album- und Show-Ordner ihr Cover
-(`cover.jpg`, auch als Ordnersymbol in Dolphin).
+Files are tagged (title, artist, album, track number, date) and carry cover
+art. The Reelcast folder gets the cassette icon; album and show folders get
+their cover (`cover.jpg`, also used as the folder icon in Dolphin).
 
-## Gut zu wissen
+## Good to know
 
-- **Lautstärke:** Spotify bleibt während der Aufnahme auf 100 %. Die Lautstärke
-  zum Mithören regelst du am System.
-- **Crossfade/Automix** in Spotify ausschalten, sonst lassen sich Übergänge
-  nicht sauber trennen. `reelcast --pruefen` zeigt das an.
-- **Spotify Connect:** Aufnehmen lässt sich nur, was auf diesem Rechner spielt.
-- **Danach:** Spotify-Strom, Lautstärke und PipeWire-Einstellungen sind wieder
-  wie vorher, der virtuelle Ausgang ist weg.
+- **Volume:** Spotify stays at 100 % while recording. Use your system volume
+  to adjust what you hear.
+- **Turn off Crossfade/Automix** in Spotify, otherwise transitions can't be
+  separated cleanly. `reelcast --check` shows the setting.
+- **Spotify Connect:** only what plays on this computer can be recorded.
+- **Afterwards:** Spotify's stream, its volume and PipeWire are back to how
+  they were, and the virtual output is gone.
 
-## Voraussetzungen (Linux)
+## Requirements (Linux)
 
-PipeWire mit `pactl`, `pw-record`, `pw-metadata`; `ffmpeg` mit libmp3lame;
-Python ≥ 3.11 mit `rich`, `numpy`, PyGObject (`gi`) und für die Oberfläche
-PySide6; Spotify als Flatpak oder nativ.
+PipeWire with `pactl`, `pw-record`, `pw-metadata`; `ffmpeg` with libmp3lame;
+Python ≥ 3.11 with `rich`, `numpy`, PyGObject (`gi`) and, for the interface,
+PySide6; Spotify as a Flatpak or native package.
 
 ## Tests
 
-`tests/run_auto_test.py` prüft den Auto-Mitschnitt gegen einen nachgebauten
-Spotify-Player (MPRIS + Testtöne): Schnittgenauigkeit, Pausen, Werbung,
-übersprungene Titel. Der Test ist nicht zu hören.
+`tests/run_auto_test.py` checks Auto Record against a fake Spotify player
+(MPRIS + test tones): cut accuracy, pauses, ads, skipped tracks. The test is
+silent.

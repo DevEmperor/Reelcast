@@ -1,7 +1,7 @@
-"""Spotify-Link → Folgen-Metadaten, ohne Spotify-Konto oder API-Schlüssel.
+"""Spotify link → episode metadata, without a Spotify account or API key.
 
-Quelle ist die öffentliche Embed-Seite (dieselbe, die Spotify für eingebettete
-Player ausliefert); als Rückfall dient oEmbed.
+The source is the public embed page (the one Spotify serves to embedded players);
+oEmbed is the fallback.
 """
 
 from __future__ import annotations
@@ -32,10 +32,10 @@ def parse_episode_id(text: str) -> str:
     if re.search(r"open\.spotify\.com/(?:intl-[A-Za-z-]+/)?(track|album|playlist|show)/", text):
         kind = re.search(r"/(track|album|playlist|show)/", text).group(1)
         raise ReelcastError(
-            f"Das ist ein Spotify-{kind}-Link. Reelcast verarbeitet einzelne Podcast-Folgen "
-            "(open.spotify.com/episode/…)."
+            f"That's a Spotify {kind} link. Links are for single podcast episodes "
+            "(open.spotify.com/episode/…) – for music, use Auto Record."
         )
-    raise ReelcastError(f"Kein Spotify-Folgenlink erkannt: {text!r}")
+    raise ReelcastError(f"Not a Spotify episode link: {text!r}")
 
 
 def fetch_episode(eid: str) -> Episode:
@@ -51,11 +51,11 @@ def _from_embed(eid: str) -> Episode:
     page = net.get_text(f"https://open.spotify.com/embed/episode/{eid}")
     m = _NEXT.search(page)
     if not m:
-        raise ValueError("embed ohne __NEXT_DATA__")
+        raise ValueError("embed page without __NEXT_DATA__")
     data = json.loads(m.group(1))
     ent = data["props"]["pageProps"]["state"]["data"]["entity"]
     if ent.get("type") not in (None, "episode"):
-        raise ReelcastError("Der Link zeigt nicht auf eine Podcast-Folge.")
+        raise ReelcastError("This link doesn't point to a podcast episode.")
     covers = sorted(
         ent.get("relatedEntityCoverArt") or [],
         key=lambda c: c.get("maxWidth") or 0,
@@ -80,7 +80,7 @@ def _from_oembed(eid: str) -> Episode:
     try:
         d = net.get_json(url)
     except Exception as e:
-        raise ReelcastError(f"Folge {eid} nicht gefunden: {e}") from e
+        raise ReelcastError(f"Episode {eid} not found: {e}") from e
     page = ""
     try:
         page = net.get_text(f"https://open.spotify.com/episode/{eid}")
@@ -108,7 +108,7 @@ def _from_oembed(eid: str) -> Episode:
 
 
 def fetch_track_release(track_id: str) -> str:
-    """Erscheinungsdatum (JJJJ-MM-TT) eines Musiktitels, leer wenn unbekannt."""
+    """Release date (YYYY-MM-DD) of a music track, empty if unknown."""
     try:
         page = net.get_text(f"https://open.spotify.com/embed/track/{track_id}")
         ent = json.loads(_NEXT.search(page).group(1))["props"]["pageProps"]["state"]["data"]["entity"]

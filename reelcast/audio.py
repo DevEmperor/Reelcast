@@ -1,10 +1,10 @@
-"""PipeWire-Seite der Aufnahme.
+"""The PipeWire side of recording.
 
-* `CaptureSink` legt einen virtuellen Ausgang an, leitet *nur* den Spotify-Strom
-  dorthin um und räumt danach alles wieder auf (Strom zurück, Lautstärke zurück,
-  Modul entladen). Systemklänge und andere Programme landen nie in der Aufnahme.
-* `Capture` liest den Monitor dieses Ausgangs verlustfrei (float32, 48 kHz),
-  misst Pegel und digitale Stille live und schreibt parallel eine FLAC-Datei.
+* `CaptureSink` creates a virtual output, routes *only* Spotify's stream to it and
+  cleans everything up afterwards (stream back, volume back, module unloaded).
+  System sounds and other apps never end up in a recording.
+* `Capture` reads that output's monitor losslessly (float32, 48 kHz), measures
+  level and digital silence live and writes a FLAC file alongside.
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ import numpy as np
 
 from .model import ReelcastError
 
-RATE = 48000  # Takt des PipeWire-Graphen; so wird nur einmal (von Spotify aus) umgerechnet
+RATE = 48000  # PipeWire graph rate; this way audio is resampled only once (from Spotify's rate)
 CHANNELS = 2
 CHUNK_FRAMES = RATE // 10  # 100 ms
-SILENCE_EPS = 1e-6  # ≈ −120 dBFS: nur echte digitale Stille (Pause, Puffern)
-GAP_MIN = 1.0  # so lange digitale Stille gilt als Lücke und wird entfernt
+SILENCE_EPS = 1e-6  # ≈ −120 dBFS: only true digital silence (pause, buffering)
+GAP_MIN = 1.0  # digital silence this long counts as a gap and is removed
 
 SINK_NAME = "reelcast"
 APP_MATCH = os.environ.get("REELCAST_APP_MATCH", "spotify").lower()
@@ -37,7 +37,7 @@ def _run(*args: str, check: bool = True) -> str:
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=15)
     except FileNotFoundError as e:
-        raise ReelcastError(f"Programm fehlt: {args[0]}") from e
+        raise ReelcastError(f"Missing program: {args[0]}") from e
     if check and p.returncode != 0:
         raise ReelcastError(f"{' '.join(args[:3])} …: {p.stderr.strip() or p.returncode}")
     return p.stdout
@@ -64,7 +64,7 @@ def _node_id(si: dict) -> str | None:
 
 
 def _target_meta(node_id: str) -> str | None:
-    """Gespeichertes Ziel (target.object) eines Stroms, None = folgt dem Standardausgang."""
+    """Stored target (target.object) of a stream; None = follows the default output."""
     out = _run("pw-metadata", "-n", "default", node_id, "target.object", check=False)
     for line in out.splitlines():
         if "key:'target.object'" in line and "value:'" in line:
@@ -92,7 +92,7 @@ class CaptureSink:
     _watcher: subprocess.Popen | None = None
     _late_routes: int = 0
 
-    # ---- Auf- und Abbau -------------------------------------------------
+    # ---- Setup and teardown ---------------------------------------------
 
     def __enter__(self) -> "CaptureSink":
         self.remove_stale()
@@ -101,7 +101,7 @@ class CaptureSink:
             "load-module",
             "module-null-sink",
             f"sink_name={self.name}",
-            "sink_properties=device.description=Reelcast-Aufnahme",
+            "sink_properties=device.description=Reelcast-Recorder",
             f"rate={RATE}",
             f"channels={CHANNELS}",
         ).strip()
@@ -128,7 +128,7 @@ class CaptureSink:
         self.modules.clear()
 
     def remove_stale(self) -> None:
-        """Überbleibsel eines abgestürzten Laufs entfernen."""
+        """Remove leftovers from a crashed run."""
         for m in pactl_json("list", "modules"):
             arg = m.get("argument") or ""
             if m.get("name") in ("module-null-sink", "module-loopback") and (
@@ -136,7 +136,7 @@ class CaptureSink:
             ):
                 _run("pactl", "unload-module", str(m.get("index")), check=False)
 
-    # ---- Spotify-Strom ----------------------------------------------------
+    # ---- Spotify's stream ---------------------------------------------------
 
     def _sinks(self) -> dict[int, str]:
         return {s["index"]: s["name"] for s in pactl_json("list", "sinks")}
@@ -145,7 +145,7 @@ class CaptureSink:
         return [si for si in pactl_json("list", "sink-inputs") if _is_app_stream(si)]
 
     def watch(self) -> None:
-        """Neue Ströme sofort umleiten (pactl subscribe), statt auf die nächste Prüfung zu warten."""
+        """Route new streams immediately (pactl subscribe) instead of waiting for the next check."""
         self._watcher = subprocess.Popen(
             ["pactl", "subscribe"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
         )
@@ -161,15 +161,15 @@ class CaptureSink:
         threading.Thread(target=loop, name="route-watch", daemon=True).start()
 
     def take_late_routes(self) -> int:
-        """Wie oft der Wächter seit der letzten Abfrage einen Strom umleiten musste."""
+        """How often the watcher had to route a stream since the last call."""
         with self.lock:
             n, self._late_routes = self._late_routes, 0
             return n
 
     def route(self) -> tuple[int, int]:
-        """Alle Spotify-Ströme auf den Aufnahme-Ausgang legen.
+        """Move all Spotify streams to the recording output.
 
-        Gibt (Anzahl Ströme, davon neu umgeleitet) zurück.
+        Returns (number of streams, of which newly routed).
         """
         with self.lock:
             return self._route()
@@ -200,7 +200,7 @@ class CaptureSink:
         return len(streams), newly
 
     def enforce_full_volume(self) -> bool:
-        """Spotify-Ströme auf dem Aufnahme-Ausgang auf 100 % halten (unverändertes Signal)."""
+        """Keep Spotify streams on the recording output at 100 % (unaltered signal)."""
         with self.lock:
             return self._enforce_full_volume()
 
@@ -218,7 +218,7 @@ class CaptureSink:
         return changed
 
     def restore(self) -> None:
-        """Ströme zurück an ihren alten Platz, alte Lautstärke wieder herstellen."""
+        """Put streams back where they were and restore their volume."""
         with self.lock:
             self._restore()
 
@@ -233,7 +233,7 @@ class CaptureSink:
             target = mv.orig_sink if mv.orig_sink in sinks else "@DEFAULT_SINK@"
             _run("pactl", "move-sink-input", str(idx), target, check=False)
             if mv.orig_target is None and mv.node_id:
-                # Der Strom folgte vorher dem Standardausgang: feste Bindung wieder lösen
+                # The stream used to follow the default output: drop the fixed binding again
                 _run("pw-metadata", "-n", "default", "-d", mv.node_id, "target.object", check=False)
             _run("pactl", "set-sink-input-volume", str(idx), *map(str, mv.orig_volume), check=False)
             _run("pactl", "set-sink-input-mute", str(idx), "1" if mv.orig_mute else "0", check=False)
@@ -241,7 +241,7 @@ class CaptureSink:
 
 
 class Capture:
-    """Nimmt den Monitor des Aufnahme-Ausgangs auf und analysiert live."""
+    """Records the recording output's monitor and analyses it live."""
 
     def __init__(self, sink_name: str, flac_path: Path, on_level=None):
         self.sink_name = sink_name
@@ -249,7 +249,7 @@ class Capture:
         self.on_level = on_level
         self.lock = threading.Lock()
         self.frames = 0  # insgesamt geschriebene Frames
-        self.cut_before = 0  # alles davor wird verworfen
+        self.cut_before = 0  # everything before this is discarded
         self.first_sound: int | None = None
         self.last_sound_end = 0
         self.gaps: list[tuple[int, int]] = []
@@ -265,7 +265,7 @@ class Capture:
     def start(self, timeout: float = 5.0) -> None:
         for tool in ("pw-record", "ffmpeg"):
             if not shutil.which(tool):
-                raise ReelcastError(f"Programm fehlt: {tool}")
+                raise ReelcastError(f"Missing program: {tool}")
         self._enc = subprocess.Popen(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -291,7 +291,7 @@ class Capture:
         self._thread.start()
         if not self._started.wait(timeout):
             self.stop()
-            raise ReelcastError("Aufnahme startet nicht (pw-record liefert keine Daten).")
+            raise ReelcastError("Recording doesn't start (pw-record delivers no data).")
 
     def stop(self) -> None:
         if self._rec and self._rec.poll() is None:
@@ -317,7 +317,7 @@ class Capture:
                 self.error = f"FLAC-Encoder: {err.strip()[:300]}"
 
     def mark_restart(self) -> None:
-        """Alles bisher Aufgenommene verwerfen (z. B. nach erneutem Sprung an den Anfang)."""
+        """Discard everything recorded so far (e.g. after jumping back to the start)."""
         with self.lock:
             self.cut_before = self.frames
             self.first_sound = None
@@ -328,7 +328,7 @@ class Capture:
 
     @property
     def content_seconds(self) -> float:
-        """Hörbare Länge seit dem ersten Ton, ohne Lücken."""
+        """Audible length since the first sound, without gaps."""
         with self.lock:
             if self.first_sound is None:
                 return 0.0
@@ -337,12 +337,12 @@ class Capture:
 
     @property
     def silent_for(self) -> float:
-        """Sekunden digitaler Stille am Ende der bisherigen Aufnahme."""
+        """Seconds of digital silence at the end of the recording so far."""
         with self.lock:
             return (self.frames - max(self.last_sound_end, self.cut_before)) / RATE
 
     def segments(self, max_seconds: float | None = None) -> list[tuple[int, int]]:
-        """Zu behaltende Abschnitte (Frame-Bereiche) der FLAC-Datei."""
+        """Sections (frame ranges) of the FLAC file to keep."""
         with self.lock:
             if self.first_sound is None:
                 return []
@@ -387,8 +387,8 @@ class Capture:
                 self._analyse(np.frombuffer(block, dtype="<f4").reshape(-1, CHANNELS))
                 self._started.set()
         except (BrokenPipeError, ValueError) as e:
-            self.error = f"Aufnahme abgebrochen: {e}"
-        except Exception as e:  # pragma: no cover - nur zur Sicherheit
+            self.error = f"Recording interrupted: {e}"
+        except Exception as e:  # pragma: no cover - just in case
             self.error = f"Aufnahmefehler: {e}"
         finally:
             self._started.set()
@@ -413,10 +413,10 @@ class Capture:
 
 
 # ---------------------------------------------------------------------------
-# Daueraufnahme für den Auto-Mitschnitt
+# Continuous recording for Auto Record
 # ---------------------------------------------------------------------------
 
-ENV_BLOCK = RATE // 100  # Hüllkurve in 10-ms-Blöcken
+ENV_BLOCK = RATE // 100  # envelope in 10 ms blocks
 
 
 def _flac_writer(path: Path) -> subprocess.Popen:
@@ -433,10 +433,10 @@ def _flac_writer(path: Path) -> subprocess.Popen:
 
 
 class Segment:
-    """Ausschnitt der Daueraufnahme (ein Titel plus Rand) als FLAC-Datei.
+    """A piece of the continuous recording (one track plus margin) as a FLAC file.
 
-    `first_frame` ist die absolute Frame-Nummer der ersten Probe in der Datei;
-    `envelope` hält den Spitzenwert jedes 10-ms-Blocks für den Feinschnitt.
+    `first_frame` is the absolute frame number of the file's first sample;
+    `envelope` holds the peak of every 10 ms block for fine cutting.
     """
 
     def __init__(self, path: Path, first_frame: int):
@@ -490,11 +490,11 @@ class Segment:
 
 
 class StreamCapture:
-    """Nimmt den Aufnahme-Ausgang ohne Unterbrechung auf.
+    """Records the recording output without interruption.
 
-    Ein Ringpuffer hält die letzten Sekunden im Speicher. So kann ein neuer Titel
-    auch dann vollständig ab seinem Anfang (plus Rand) in eine eigene Datei
-    geschrieben werden, wenn der Titelwechsel erst etwas später erkannt wird.
+    A ring buffer keeps the last few seconds in memory, so a new track can be
+    written to its own file complete from its start (plus margin) even when the
+    track change is only noticed a moment later.
     """
 
     def __init__(self, sink_name: str, workdir: Path, on_level=None, preroll: float = 6.0):
@@ -514,7 +514,7 @@ class StreamCapture:
 
     def start(self, timeout: float = 5.0) -> None:
         if not shutil.which("pw-record") or not shutil.which("ffmpeg"):
-            raise ReelcastError("pw-record oder ffmpeg fehlt.")
+            raise ReelcastError("pw-record or ffmpeg is missing.")
         self.workdir.mkdir(parents=True, exist_ok=True)
         self._rec = subprocess.Popen(
             [
@@ -531,7 +531,7 @@ class StreamCapture:
         self._thread.start()
         if not self._started.wait(timeout):
             self.stop()
-            raise ReelcastError("Aufnahme startet nicht (pw-record liefert keine Daten).")
+            raise ReelcastError("Recording doesn't start (pw-record delivers no data).")
 
     def stop(self) -> None:
         if self._rec and self._rec.poll() is None:
@@ -548,7 +548,7 @@ class StreamCapture:
             seg.close()
 
     def open_segment(self, start_frame: int, name: str) -> Segment:
-        """Neue Datei ab `start_frame` (darf bis zu `preroll` in der Vergangenheit liegen)."""
+        """New file from `start_frame` (may lie up to `preroll` in the past)."""
         with self.lock:
             start = max(int(start_frame), self.frames - self._ring_frames, 0)
             seg = Segment(self.workdir / f"{name}.flac", start)
@@ -559,7 +559,7 @@ class StreamCapture:
             return seg
 
     def end_segment(self, seg: Segment, end_frame: int) -> None:
-        """Ab `end_frame` nichts mehr schreiben; die Datei schließt sich dann selbst."""
+        """Stop writing at `end_frame`; the file then closes itself."""
         with self.lock:
             seg.end_frame = max(int(end_frame), seg.first_frame)
             if seg.first_frame + seg.frames >= seg.end_frame:
@@ -603,7 +603,7 @@ class StreamCapture:
                 if self.on_level:
                     peak = float(np.abs(frames).max()) if len(frames) else 0.0
                     self.on_level(20 * np.log10(peak) if peak > 1e-7 else -120.0)
-        except Exception as e:  # pragma: no cover - nur zur Sicherheit
+        except Exception as e:  # pragma: no cover - just in case
             self.error = f"Aufnahmefehler: {e}"
         finally:
             self._started.set()

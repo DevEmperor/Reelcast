@@ -1,4 +1,4 @@
-"""Kleine HTTP-Helfer auf Basis der Standardbibliothek."""
+"""Small HTTP helpers on top of the standard library."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ TIMEOUT = 20
 
 
 def _request(url: str, headers: dict | None = None) -> urllib.request.Request:
-    h = {"User-Agent": UA, "Accept-Language": "de,en;q=0.8"}
+    h = {"User-Agent": UA, "Accept-Language": "en,de;q=0.8"}
     if headers:
         h.update(headers)
     return urllib.request.Request(url, headers=h)
@@ -35,7 +35,7 @@ def get_bytes(url: str, retries: int = 2, headers: dict | None = None) -> bytes:
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = e
         time.sleep(0.8 * (attempt + 1))
-    raise ReelcastError(f"Netzwerkfehler bei {urllib.parse.urlsplit(url).netloc}: {last}")
+    raise ReelcastError(f"Network error at {urllib.parse.urlsplit(url).netloc}: {last}")
 
 
 def get_text(url: str, **kw) -> str:
