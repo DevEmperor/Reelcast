@@ -60,6 +60,9 @@ class Entry:
     reason: str = ""
     path: Path | None = None
     duration: float = 0.0
+    artist: str = ""
+    album: str = ""
+    art_url: str = ""
 
 
 class SessionReporter(Reporter):
@@ -246,7 +249,9 @@ class AutoSession:
         else:
             subtitle = " · ".join(x for x in (_join(meta.get("xesam:artist")), str(meta.get("xesam:album") or "")) if x)
         length = (meta.get("mpris:length") or 0) / 1e6
-        entry = Entry(next(self._keys), kind, title, subtitle, length)
+        entry = Entry(next(self._keys), kind, title, subtitle, length,
+                      artist=_join(meta.get("xesam:artist")), album=str(meta.get("xesam:album") or ""),
+                      art_url=str(meta.get("mpris:artUrl") or ""))
         seg = None
         if kind == "ad":
             entry.state, entry.reason = "skipped", "Werbung – ignoriert"
