@@ -20,6 +20,7 @@ from rich.text import Text
 from . import __version__, doctor
 from .engine import Engine, default_out_dir
 from .model import Cancelled, CancelToken, Episode, Options, Reporter, ReelcastError, fmt_duration
+from .session import AutoSession, Entry, SessionReporter
 
 console = Console(highlight=False)
 
@@ -213,6 +214,186 @@ class LiveReporter(Reporter):
         )
 
 
+ICONS = {
+    "recording": ("●", REC),
+    "partial": ("◌", DIM),
+    "encoding": ("⧗", AMBER),
+    "saved": ("✓", AMBER),
+    "exists": ("↷", DIM),
+    "skipped": ("·", DIM),
+    "failed": ("✗", REC),
+}
+
+
+class AutoLiveReporter(SessionReporter):
+    """Anzeige für den Auto-Mitschnitt: Kassette mit laufendem Titel + Logbuch."""
+
+    def __init__(self) -> None:
+        self.status_text = "Starte …"
+        self.current: Entry | None = None
+        self.pos = 0.0
+        self.length = 0.0
+        self.entries: dict[int, Entry] = {}
+        self.levels: deque = deque(maxlen=64)
+        self._acc: list[float] = []
+        self.live: Live | None = None
+        self.started = time.monotonic()
+
+    # ---- SessionReporter ------------------------------------------------------
+
+    def status(self, text: str) -> None:
+        self.status_text = text
+
+    def now_playing(self, entry: Entry | None) -> None:
+        self.current = entry
+        self.pos, self.length = 0.0, entry.length if entry else 0.0
+        if entry is None:
+            self.levels.clear()
+
+    def position(self, pos: float, length: float) -> None:
+        self.pos, self.length = pos, length
+
+    def entry(self, entry: Entry) -> None:
+        if entry.state == "dropped":
+            self.entries.pop(entry.key, None)
+        else:
+            self.entries[entry.key] = entry
+
+    def level(self, peak_db: float) -> None:
+        if self.current is None:
+            return
+        self._acc.append(peak_db)
+        if len(self._acc) >= 3:
+            self.levels.append(max(self._acc))
+            self._acc = []
+
+    def info(self, text: str) -> None:
+        self._print(Text("  " + text, style=DIM))
+
+    def warn(self, text: str) -> None:
+        self._print(Text("  ▲ " + text, style=AMBER))
+
+    def _print(self, renderable) -> None:
+        (self.live.console if self.live else console).print(renderable)
+
+    # ---- Darstellung -----------------------------------------------------------
+
+    def render(self):
+        now = time.monotonic()
+        cur = self.current
+        recording = cur is not None and cur.state == "recording" and self.status_text == "Nimmt auf"
+        badge = Text()
+        if recording:
+            badge.append("● REC" if int(now * 2) % 2 == 0 else "○ REC", style=f"bold {REC}")
+        elif cur is not None and self.status_text == "Pausiert":
+            badge.append("❚❚ PAUSE", style=f"bold {AMBER}")
+        else:
+            badge.append(SPOKES[int(now * 4) % 4] + " BEREIT", style=f"bold {AMBER}")
+        text = self.status_text
+        if cur is not None and cur.state == "partial":
+            text = f"wird nicht gespeichert – {cur.reason}"
+        elif cur is not None and cur.state == "skipped":
+            text = f"ignoriert – {cur.reason}"
+        badge.append("  " + text, style=DIM)
+        rows = [badge]
+
+        if cur is not None:
+            rows.append(Text(cur.title, style=f"bold {CREAM}"))
+            rows.append(Text(cur.subtitle or " ", style=AMBER))
+        else:
+            rows.append(Text("Spiel in Spotify etwas ab – Reelcast schneidet automatisch mit.", style=CREAM))
+            rows.append(Text(" "))
+        frac = self.pos / self.length if self.length else 0.0
+        frac = max(0.0, min(1.0, frac))
+        rows += [Text(""), cassette(frac, self.levels, spinning=recording)]
+        if cur is not None and self.length:
+            line = Table.grid(padding=(0, 2))
+            line.add_column()
+            line.add_column(style=DIM)
+            line.add_row(
+                ProgressBar(total=1.0, completed=frac, width=46, complete_style=AMBER,
+                            finished_style=AMBER, style=DARK),
+                f"{fmt_duration(self.pos)} / {fmt_duration(self.length)}",
+            )
+            rows += [Text(""), line]
+
+        log = [e for e in self.entries.values() if e is not cur or e.state not in ("recording",)]
+        if log:
+            rows.append(Text(""))
+            for e in log[-8:]:
+                icon, color = ICONS.get(e.state, ("·", DIM))
+                t = Text(f"  {icon} ", style=f"bold {color}")
+                t.append(e.title, style=CREAM if e.state in ("saved", "encoding") else DIM)
+                if e.subtitle:
+                    t.append(f" — {e.subtitle}", style=DIM)
+                if e.state == "saved":
+                    t.append(f"  {fmt_duration(e.duration)}", style=AMBER)
+                elif e.state == "encoding":
+                    t.append("  wird gespeichert …", style=AMBER)
+                elif e.reason:
+                    t.append(f"  {e.reason}", style=DIM)
+                t.truncate(console.width - 8, overflow="ellipsis")
+                rows.append(t)
+
+        saved = [e for e in self.entries.values() if e.state == "saved"]
+        total = sum(e.duration for e in saved)
+        rows += [Text(""), Text(
+            f"{len(saved)} mitgeschnitten · {fmt_duration(total)} · läuft seit "
+            f"{fmt_duration(now - self.started)} · Strg+C beendet", style=DIM)]
+        return Panel(
+            Group(*rows),
+            title=Text.assemble((" REELCAST ", f"bold black on {AMBER}"), (" AUTO ", f"bold {AMBER}")),
+            title_align="left",
+            border_style=AMBER,
+            padding=(0, 2),
+        )
+
+
+def run_auto(opts: Options) -> int:
+    cancel = CancelToken()
+    signal.signal(signal.SIGTERM, lambda *_: cancel.cancel())
+    console.print(banner())
+    console.print()
+    rep = AutoLiveReporter()
+    session = AutoSession(opts, rep, cancel)
+    outcome: dict = {}
+
+    def work():
+        try:
+            session.run()
+        except BaseException as e:
+            outcome["error"] = e
+
+    th = threading.Thread(target=work, name="auto", daemon=True)
+    with Live(get_renderable=rep.render, console=console, refresh_per_second=12, transient=True) as live:
+        rep.live = live
+        th.start()
+        while th.is_alive():
+            try:
+                th.join(0.1)
+            except KeyboardInterrupt:
+                if not cancel.cancelled:
+                    cancel.cancel()
+                    rep.status_text = "Beende – speichere noch Offenes …"
+        rep.live = None
+
+    saved = [e for e in session.entries if e.state == "saved"]
+    for e in saved:
+        console.print(Text.assemble(("✓ ", f"bold {AMBER}"), (e.title, f"bold {CREAM}"),
+                                    (f"  {fmt_duration(e.duration)}", DIM)))
+        console.print(Text(f"  {e.path}", style=AMBER))
+    failed = [e for e in session.entries if e.state == "failed"]
+    for e in failed:
+        console.print(Text.assemble(("✗ ", f"bold {REC}"), (e.title, "bold"), (f"  {e.reason}", REC)))
+    err = outcome.get("error")
+    if err:
+        msg = str(err) if isinstance(err, ReelcastError) else f"{type(err).__name__}: {err}"
+        console.print(Text(f"✗ {msg}", style=REC))
+        return 1
+    console.print(Text(f"\n{len(saved)} Titel mitgeschnitten.", style="bold"))
+    return 0
+
+
 def run_jobs(links: list[str], opts: Options) -> int:
     cancel = CancelToken()
     results = []
@@ -293,7 +474,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-f", "--format", choices=("mp3", "m4a", "opus", "flac"), default="mp3")
     p.add_argument("-q", "--qualitaet", type=int, default=2, choices=range(10), metavar="0-9",
                    help="MP3-VBR-Stufe, 0 = beste (Standard 2 ≈ 190 kbit/s)")
+    p.add_argument("-a", "--auto", action="store_true",
+                   help="Auto-Mitschnitt: alles, was Spotify spielt, titelgenau mitschneiden")
     p.add_argument("--mithoeren", action="store_true", help="Aufnahme über die Lautsprecher mithören")
+    p.add_argument("--stumm", action="store_true", help="im Auto-Modus nicht mithören")
     p.add_argument("--ueberschreiben", action="store_true", help="vorhandene Dateien ersetzen")
     p.add_argument("--erzwingen", action="store_true", help="laufende Spotify-Wiedergabe unterbrechen")
     p.add_argument("--spotify-zeigen", action="store_true", help="selbst gestartetes Spotify nicht minimieren")
@@ -313,6 +497,15 @@ def main(argv: list[str] | None = None) -> int:
         console.print(banner())
         console.print()
         return doctor.print_report(console)
+
+    if args.auto:
+        return run_auto(Options(
+            out_dir=(args.ziel or default_out_dir()).expanduser(),
+            fmt=args.format,
+            quality=args.qualitaet,
+            listen=not args.stumm,
+            overwrite=args.ueberschreiben,
+        ))
 
     links = list(args.links)
     if args.liste:

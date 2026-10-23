@@ -249,7 +249,7 @@ class AutoSession:
         entry = Entry(next(self._keys), kind, title, subtitle, length)
         seg = None
         if kind == "ad":
-            entry.state, entry.reason = "skipped", "Werbung"
+            entry.state, entry.reason = "skipped", "Werbung – ignoriert"
         elif kind == "other":
             entry.state, entry.reason = "skipped", "lokale Datei"
         elif not length:
