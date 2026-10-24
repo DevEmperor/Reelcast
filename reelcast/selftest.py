@@ -159,9 +159,18 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
             if sp.status() != "Playing":
                 sp.play()
             if first:
-                time.sleep(3)  # …and it may jump to where the track was left off
-                if track()[2] > time.monotonic() - started + 1.5:
-                    log(f"Spotify resumed A at {track()[2]:.1f} s – rewinding to the start, as a person would")
+                # …and within the first seconds it may jump to where it left the track before,
+                # forwards or back. A person would start the track over – so does the test.
+                jumped, last = False, None
+                while time.monotonic() - started < 4.0:
+                    now, pos = time.monotonic(), track()[2]
+                    if last and abs((pos - last[1]) - (now - last[0])) > 0.5:
+                        jumped = True
+                    last = (now, pos)
+                    time.sleep(0.1)
+                if jumped or track()[2] > time.monotonic() - started + 1.5:
+                    log(f"Spotify jumped within A's first seconds (now {track()[2]:.1f} s) – "
+                        "starting A over, as a person would")
                     sp.set_position(a_id, 0.0)
                     wait_for(lambda: track()[2] < 2.0, 10, "A rewound")
             a_len = track()[1]

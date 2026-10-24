@@ -45,6 +45,7 @@ SPEED_TOL = 0.04
 DEBUG = bool(os.environ.get("REELCAST_DEBUG"))
 QUIET = 10 ** (-85 / 20)  # silence for fine cutting (practically digital zero)
 ZERO = 1e-6  # digital zero (pause/buffering)
+MIN_STALL = 0.05  # shorter buffering hiccups stay (Spotify stutters this briefly under load)
 SOUND = 10 ** (-60 / 20)  # a track whose loudest moment stays below this was not recorded
 
 # Session states for front ends – the display text is up to them.
@@ -660,7 +661,7 @@ def _without_stalls(keep, stalls, first_frame, env) -> list[tuple[int, int]]:
     for a_abs, b_abs, want in stalls:
         a, b = a_abs - first_frame, b_abs - first_frame
         want = int(want)
-        if want < RATE // 5:
+        if want < MIN_STALL * RATE:
             continue
         # look for digital zero around the pause
         ba, bb = max(0, a // ENV_BLOCK - 20), min(len(env), b // ENV_BLOCK + 20)
@@ -677,9 +678,15 @@ def _without_stalls(keep, stalls, first_frame, env) -> list[tuple[int, int]]:
             else:
                 i += 1
         if not best:
+            if DEBUG:
+                print(f"[session] stall at {a / RATE:7.2f} s: want {want / RATE * 1000:5.0f} ms, "
+                      "no digital zero – kept", file=sys.stderr)
             continue
         ra, rb = best[0] * ENV_BLOCK, best[1] * ENV_BLOCK
         cut = min(want, rb - ra)
+        if DEBUG:
+            print(f"[session] stall at {a / RATE:7.2f} s: want {want / RATE * 1000:5.0f} ms, "
+                  f"digital zero {(rb - ra) / RATE * 1000:5.0f} ms, cut {cut / RATE * 1000:5.0f} ms", file=sys.stderr)
         ca = ra + (rb - ra - cut) // 2
         cb = ca + cut
         nxt = []

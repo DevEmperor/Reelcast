@@ -95,10 +95,12 @@ for exp in expected:
     head = x[int(0.01 * 48000):int(0.11 * 48000)]
     sound = np.flatnonzero(np.abs(x) > 1e-3)
     tail = x[sound[-1] - int(0.1 * 48000):sound[-1]] if len(sound) else x[:0]
-    zeros = np.abs(x) < 1e-6
+    # 1 ms blocks, silent when every sample is zero (sampling every 48th value would hit
+    # the same phase of a 1000 Hz tone each time)
+    zeros = np.abs(x[: len(x) // 48 * 48]).reshape(-1, 48).max(axis=1) < 1e-6
     longest = 0
     run = 0
-    for z in zeros[::48]:  # 1 ms grid
+    for z in zeros:
         run = run + 1 if z else 0
         longest = max(longest, run)
     fh, ft = freq(head), freq(tail)
