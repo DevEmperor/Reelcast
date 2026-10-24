@@ -23,19 +23,20 @@ AUTOMATION_HINT = (
     "Privacy & Security → Automation → Reelcast → Spotify."
 )
 PERMISSION_PENDING = (
-    "macOS is asking whether Reelcast is allowed to control Spotify – click “Allow” in that "
-    "dialog (unlock the screen first if it is locked)."
+    "Waiting for Spotify – if macOS asks whether Reelcast is allowed to control Spotify, "
+    "click “Allow” (unlock the screen first if it is locked)."
 )
 PERMISSION_WAIT = 120  # seconds to wait for that click
+SLOW_SAMPLE = 0.3  # a position Spotify took longer than this to report is too vague to use
 AUDIO_HINT = (
     "Reelcast isn't allowed to record Spotify's audio. Allow it under System Settings → "
     "Privacy & Security → Screen & System Audio Recording."
 )
 
 
-def _control(command: str, arg: str = "") -> str:
+def _control(command: str, *arguments: str) -> str:
     """Run a Spotify command through the helper; returns an error message or ""."""
-    args = [tools.helper(), "control", command] + ([arg] if arg else [])
+    args = [tools.helper(), "control", command, *arguments]
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -85,7 +86,13 @@ class _StateReader:
                 st = json.loads(line)
             except ValueError:
                 continue
-            st["_mono"] = time.monotonic()
+            prev = self.state
+            if (st.get("posSpan", 0.0) > SLOW_SAMPLE and prev.get("id") == st.get("id")
+                    and prev.get("status") == st.get("status")):
+                continue  # Spotify answered too slowly to date the position – keep extrapolating
+            # "t" is when Spotify reported the position (wall clock), which can be well
+            # before this line arrives.
+            st["_mono"] = time.monotonic() - max(0.0, time.time() - float(st.get("t") or time.time()))
             self.state = st
             self.updated.set()
 
@@ -158,8 +165,9 @@ class MacSpotify:
 
     # ---- commands -----------------------------------------------------------------
 
-    def open_uri(self, uri: str) -> None:
-        err = _control("open", uri)
+    def open_uri(self, uri: str, context: str = "") -> None:
+        """Play `uri`, inside `context` (an album or playlist URI) if given."""
+        err = _control("open", uri, *([context] if context else []))
         if err:
             raise ReelcastError(err)
 

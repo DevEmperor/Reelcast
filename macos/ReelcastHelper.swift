@@ -8,8 +8,9 @@
 //   reelcast-helper state [--interval S]
 //                                    Streams Spotify's player state as JSON lines
 //                                    ("pending": true while macOS asks for permission).
-//   reelcast-helper control <command> [argument]
-//                                    play | pause | next | open URI | seek SECONDS | volume 0-100 | quit
+//   reelcast-helper control <command> [argument...]
+//                                    play | pause | next | open URI [CONTEXT] | seek SECONDS |
+//                                    volume 0-100 | quit
 //   reelcast-helper check            Permission and device overview as JSON.
 
 import AVFoundation
@@ -365,19 +366,38 @@ func runScript(_ source: String) -> (String?, String?) {
     return (result.stringValue, nil)
 }
 
-let stateScript = """
+// Spotify answers every property in an Apple Event of its own, and in a busy system a full
+// query takes seconds. So the position is fetched on its own and timed (the sample time is
+// the middle of that one event), and the track's details only when the track changes.
+let statusScript = """
 if application "Spotify" is running then
     tell application "Spotify"
-        set playerStateText to player state as string
-        set positionMs to round ((player position) * 1000)
-        set volumeLevel to sound volume
-        set reply to playerStateText & "\(separator)" & positionMs & "\(separator)" & volumeLevel
+        set reply to (player state as string) & "\(separator)" & sound volume
         try
-            set trk to current track
-            set reply to reply & "\(separator)" & (id of trk) & "\(separator)" & (name of trk) & "\(separator)" & (artist of trk) & "\(separator)" & (album of trk) & "\(separator)" & (album artist of trk) & "\(separator)" & (track number of trk) & "\(separator)" & (disc number of trk) & "\(separator)" & (duration of trk) & "\(separator)" & (artwork url of trk)
+            set reply to reply & "\(separator)" & (id of current track)
         end try
         return reply
     end tell
+else
+    return "not running"
+end if
+"""
+
+let trackScript = """
+if application "Spotify" is running then
+    tell application "Spotify"
+        set trk to current track
+        return (id of trk) & "\(separator)" & (name of trk) & "\(separator)" & (artist of trk) & "\(separator)" & (album of trk) & "\(separator)" & (album artist of trk) & "\(separator)" & (track number of trk) & "\(separator)" & (disc number of trk) & "\(separator)" & (duration of trk) & "\(separator)" & (artwork url of trk)
+    end tell
+else
+    return "not running"
+end if
+"""
+
+let positionScript = """
+if application "Spotify" is running then
+    tell application "Spotify" to set p to player position
+    return (round (p * 1000)) as text
 else
     return "not running"
 end if
@@ -395,12 +415,14 @@ func spotifyRunning() -> Bool {
     return false
 }
 
-/// The `state` stream. AppleScript blocks while macOS asks the user to allow controlling
-/// Spotify (or while the screen is locked and it can't ask), so a watchdog keeps the stream
-/// alive in the meantime: "running" from the process list, plus "pending": true.
+/// The `state` stream. The first Apple Event to Spotify blocks while macOS asks the user to
+/// allow controlling Spotify (or while the screen is locked and it can't ask), so until
+/// Spotify has answered once, a watchdog keeps the stream alive: "running" from the process
+/// list, plus "pending": true.
 final class StateStream: @unchecked Sendable {
     private let lock = NSLock()
     private var lastSent = Date()
+    private var answered = false
 
     init() {
         let thread = Thread { [unowned self] in self.watch() }
@@ -408,12 +430,13 @@ final class StateStream: @unchecked Sendable {
         thread.start()
     }
 
-    func send(_ state: [String: Any]) {
+    func send(_ state: [String: Any], answered: Bool = false) {
         var state = state
-        state["t"] = Date().timeIntervalSince1970
+        if state["t"] == nil { state["t"] = Date().timeIntervalSince1970 }
         lock.lock()
         emit(state, to: .standardOutput)
         lastSent = Date()
+        self.answered = self.answered || answered
         lock.unlock()
     }
 
@@ -421,42 +444,74 @@ final class StateStream: @unchecked Sendable {
         while true {
             Thread.sleep(forTimeInterval: 0.5)
             lock.lock()
-            let quiet = Date().timeIntervalSince(lastSent)
+            let waiting = !answered && Date().timeIntervalSince(lastSent) > 1.5
             lock.unlock()
-            if quiet > 1.0 {
+            if waiting {
                 send(spotifyRunning() ? ["running": true, "pending": true] : ["running": false])
             }
         }
     }
 }
 
-func spotifyState(script: NSAppleScript) -> [String: Any] {
-    var error: NSDictionary?
-    let result = script.executeAndReturnError(&error)
-    if let e = error {
-        return ["running": true, "error": (e[NSAppleScript.errorMessage] as? String) ?? "AppleScript error",
-                "errorNumber": (e[NSAppleScript.errorNumber] as? Int) ?? 0]
+final class SpotifyState {
+    private let status: NSAppleScript
+    private let track: NSAppleScript
+    private let position: NSAppleScript
+    private var trackID = ""
+    private var trackInfo: [String: Any] = [:]
+
+    init?() {
+        guard let status = NSAppleScript(source: statusScript), let track = NSAppleScript(source: trackScript),
+              let position = NSAppleScript(source: positionScript) else { return nil }
+        for script in [status, track, position] {
+            var error: NSDictionary?
+            script.compileAndReturnError(&error)
+        }
+        (self.status, self.track, self.position) = (status, track, position)
     }
-    guard let text = result.stringValue, text != "not running" else { return ["running": false] }
-    let f = text.components(separatedBy: separator)
-    var state: [String: Any] = [
-        "running": true,
-        "status": f[0],
-        "position": (Double(f[1]) ?? 0) / 1000.0,
-        "volume": Int(f[2]) ?? 100,
-    ]
-    if f.count >= 12 {
-        state["id"] = f[3]
-        state["name"] = f[4]
-        state["artist"] = f[5]
-        state["album"] = f[6]
-        state["albumArtist"] = f[7]
-        state["trackNumber"] = Int(f[8]) ?? 0
-        state["discNumber"] = Int(f[9]) ?? 0
-        state["durationMs"] = Int(f[10]) ?? 0
-        state["artworkUrl"] = f[11]
+
+    private func run(_ script: NSAppleScript) -> (String?, NSDictionary?) {
+        var error: NSDictionary?
+        let result = script.executeAndReturnError(&error)
+        return (error == nil ? result.stringValue : nil, error)
     }
-    return state
+
+    /// One sample, or nil when Spotify didn't answer every part (the caller just tries again).
+    func sample() -> [String: Any]? {
+        let (text, error) = run(status)
+        if let e = error {
+            return ["running": true, "error": (e[NSAppleScript.errorMessage] as? String) ?? "AppleScript error",
+                    "errorNumber": (e[NSAppleScript.errorNumber] as? Int) ?? 0]
+        }
+        guard let text = text, text != "not running" else { return ["running": false] }
+        let f = text.components(separatedBy: separator)
+        let id = f.count > 2 ? f[2] : ""
+        if id != trackID {
+            trackID = ""
+            trackInfo = [:]
+            if !id.isEmpty {
+                guard let details = run(track).0?.components(separatedBy: separator),
+                      details.count >= 9, details[0] == id else { return nil }
+                trackInfo = [
+                    "id": id, "name": details[1], "artist": details[2], "album": details[3],
+                    "albumArtist": details[4], "trackNumber": Int(details[5]) ?? 0,
+                    "discNumber": Int(details[6]) ?? 0, "durationMs": Int(details[7]) ?? 0,
+                    "artworkUrl": details[8],
+                ]
+            }
+            trackID = id
+        }
+        let before = Date().timeIntervalSince1970
+        let (ms, positionError) = run(position)
+        let after = Date().timeIntervalSince1970
+        guard positionError == nil, let ms = ms, let value = Double(ms) else { return nil }
+        var state: [String: Any] = [
+            "running": true, "status": f[0], "volume": Int(f.count > 1 ? f[1] : "") ?? 100,
+            "position": value / 1000.0, "t": (before + after) / 2, "posSpan": after - before,
+        ]
+        state.merge(trackInfo) { current, _ in current }
+        return state
+    }
 }
 
 func quoted(_ s: String) -> String {
@@ -471,7 +526,8 @@ func control(_ args: [String]) -> Int32 {
     case "play": body = "play"
     case "pause": body = "pause"
     case "next": body = "next track"
-    case "open": body = "play track \(quoted(arg))"
+    case "open":
+        body = "play track \(quoted(arg))" + (args.count > 2 ? " in context \(quoted(args[2]))" : "")
     case "seek": body = "set player position to \(Double(arg) ?? 0)"
     case "volume": body = "set sound volume to \(Int(arg) ?? 100)"
     case "quit": body = "quit"
@@ -514,12 +570,12 @@ case "tap":
 case "state":
     var interval = 0.1
     if let i = args.firstIndex(of: "--interval"), i + 1 < args.count, let v = Double(args[i + 1]) { interval = v }
-    guard let script = NSAppleScript(source: stateScript) else { fail("could not compile state script") }
-    var compileError: NSDictionary?
-    script.compileAndReturnError(&compileError)
+    guard let spotify = SpotifyState() else { fail("could not compile the state scripts") }
     let stream = StateStream()
     while true {  // NSAppleScript stays on the main thread
-        stream.send(spotifyState(script: script))
+        if let state = spotify.sample() {
+            stream.send(state, answered: state["running"] as? Bool == true)
+        }
         Thread.sleep(forTimeInterval: interval)
     }
 

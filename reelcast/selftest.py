@@ -128,18 +128,40 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
 
             album = _album_track_ids()
             before = track()[0]
-            sp.open_uri(ALBUM)
+            # Spotify for Mac resumes an album where it was left off instead of starting it
+            # over, so there the test asks for track 1 explicitly.
+            first = album[0] if PLATFORM == "macOS" and album else ""
 
             def on_album() -> str | None:
                 tid = track()[0]
                 if not tid or tid == before:
                     return None
-                return tid if not album or tid.rsplit("/", 1)[-1] in album else None
+                ident = tid.rsplit("/", 1)[-1]
+                if first:
+                    return tid if ident == first else None
+                return tid if not album or ident in album else None
 
-            a_id = wait_for(on_album, 30, "album playback")
+            for attempt in range(3):
+                if first:
+                    sp.open_uri("spotify:track:" + first, context=ALBUM)
+                else:
+                    sp.open_uri(ALBUM)
+                try:
+                    a_id = wait_for(on_album, 15 if first else 30, "album playback")
+                    break
+                except TimeoutError:
+                    if attempt == 2:
+                        raise
+            started = time.monotonic()
             time.sleep(1)
             if sp.status() != "Playing":
                 sp.play()
+            if first:
+                time.sleep(3)  # …and it may jump to where the track was left off
+                if track()[2] > time.monotonic() - started + 1.5:
+                    log(f"Spotify resumed A at {track()[2]:.1f} s – rewinding to the start, as a person would")
+                    sp.set_position(a_id, 0.0)
+                    wait_for(lambda: track()[2] < 2.0, 10, "A rewound")
             a_len = track()[1]
             log(f"Track A {a_id} ({a_len:.1f} s)")
             wait_for(lambda: track()[2] >= 6, 30, "A at 0:06")
@@ -214,8 +236,10 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
         for e in reversed(entries)
     ]
     for step in result["steps"]:
+        # A track can appear more than once (e.g. a fragment Spotify resumed, then the full
+        # replay) – what counts is whether one of them was saved.
         match = [e for e in entries if abs(e.length - step["length"]) < 0.5 and e.kind == "track"]
-        e = match[0] if match else None
+        e = next((x for x in match if x.state in ("saved", "exists")), match[0] if match else None)
         if step["expect"] == "saved":
             ok = e is not None and e.state == "saved" and e.path and Path(e.path).exists()
             check(f"Track {step['track']} saved", ok, f"state={e.state if e else 'missing'}")
@@ -311,8 +335,8 @@ def _warm_up(sp, win, log, wait_for) -> None:
     time.sleep(3)
 
 
-def _album_track_ids() -> set[str]:
-    """Track IDs of the test album (empty if Spotify's embed page can't be read)."""
+def _album_track_ids() -> list[str]:
+    """Track IDs of the test album in order (empty if Spotify's embed page can't be read)."""
     import re
 
     from . import net
@@ -322,9 +346,9 @@ def _album_track_ids() -> set[str]:
         data = json.loads(re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
                                     page, re.S).group(1))
         tracks = data["props"]["pageProps"]["state"]["data"]["entity"]["trackList"]
-        return {t["uri"].rsplit(":", 1)[-1] for t in tracks}
+        return [t["uri"].rsplit(":", 1)[-1] for t in tracks]
     except Exception:
-        return set()
+        return []
 
 
 def _probe(path: Path) -> dict:
@@ -346,9 +370,12 @@ def _waveform(path: Path, png: Path) -> dict:
 
     from . import tools
 
-    raw = subprocess.run([tools.ffmpeg(), "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "1",
-                          "-ar", "8000", "-"], capture_output=True).stdout
-    x = np.frombuffer(raw, dtype="<f4")
+    # WAV, not raw f32le: the slim macOS FFmpeg has no raw muxer.
+    raw = subprocess.run([tools.ffmpeg(), "-v", "error", "-i", str(path), "-ac", "1", "-ar", "8000",
+                          "-c:a", "pcm_f32le", "-f", "wav", "-"], capture_output=True).stdout
+    data = raw.find(b"data")
+    pcm = raw[data + 8:] if data >= 0 else b""
+    x = np.frombuffer(pcm[: len(pcm) // 4 * 4], dtype="<f4")
     w, h = 1200, 260
     img = QImage(w, h, QImage.Format_ARGB32)
     img.fill(QColor("#121016"))

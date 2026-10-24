@@ -9,6 +9,8 @@ from __future__ import annotations
 import html
 import json
 import re
+import time
+import urllib.error
 import urllib.parse
 
 from . import net
@@ -47,13 +49,33 @@ def fetch_episode(eid: str) -> Episode:
         return _from_oembed(eid)
 
 
+def _embed_entity(kind: str, ident: str, tries: int = 8) -> dict:
+    """The entity from Spotify's embed page.
+
+    Some of Spotify's servers answer "page not found" for pages that exist – as HTTP 404 or
+    as a 404 page with status 200, for about every second request. Asking again helps.
+    """
+    for attempt in range(1, tries + 1):
+        try:
+            page = net.get_text(f"https://open.spotify.com/embed/{kind}/{ident}")
+        except urllib.error.HTTPError as e:
+            if e.code != 404 or attempt == tries:
+                raise
+        else:
+            m = _NEXT.search(page)
+            if not m:
+                raise ValueError("embed page without __NEXT_DATA__")
+            props = json.loads(m.group(1))["props"]["pageProps"]
+            if "state" in props:
+                return props["state"]["data"]["entity"]
+            if props.get("status") != 404 or attempt == tries:
+                raise LookupError(f"Spotify's embed page has no data for {kind} {ident}")
+        time.sleep(0.3 * attempt)
+    raise LookupError(f"Spotify's embed page has no data for {kind} {ident}")
+
+
 def _from_embed(eid: str) -> Episode:
-    page = net.get_text(f"https://open.spotify.com/embed/episode/{eid}")
-    m = _NEXT.search(page)
-    if not m:
-        raise ValueError("embed page without __NEXT_DATA__")
-    data = json.loads(m.group(1))
-    ent = data["props"]["pageProps"]["state"]["data"]["entity"]
+    ent = _embed_entity("episode", eid)
     if ent.get("type") not in (None, "episode"):
         raise ReelcastError("This link doesn't point to a podcast episode.")
     covers = sorted(
@@ -110,8 +132,7 @@ def _from_oembed(eid: str) -> Episode:
 def fetch_track_release(track_id: str) -> str:
     """Release date (YYYY-MM-DD) of a music track, empty if unknown."""
     try:
-        page = net.get_text(f"https://open.spotify.com/embed/track/{track_id}")
-        ent = json.loads(_NEXT.search(page).group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+        ent = _embed_entity("track", track_id, tries=4)
         return ((ent.get("releaseDate") or {}).get("isoString") or "")[:10]
     except Exception:
         return ""
