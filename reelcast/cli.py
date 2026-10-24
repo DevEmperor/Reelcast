@@ -476,8 +476,8 @@ def run_jobs(links: list[str], opts: Options) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="reelcast",
-        description="Reelcast – record podcasts and music from Spotify, track by track. Spotify "
-        "plays silently into a virtual output and Reelcast records exactly that stream.",
+        description="Reelcast – record podcasts and music from Spotify, track by track. Reelcast "
+        "records Spotify's own audio stream – nothing else ends up in a recording.",
     )
     p.add_argument("links", nargs="*", metavar="LINK", help="Spotify episode link(s) or spotify:episode:…")
     p.add_argument("-a", "--auto", action="store_true",
