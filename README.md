@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/DevEmperor/reelcast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/DevEmperor/reelcast?color=ffb000&labelColor=121016&style=flat-square"></a>
+  <a href="https://github.com/DevEmperor/Reelcast/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/DevEmperor/Reelcast?color=ffb000&labelColor=121016&style=flat-square"></a>
   <img alt="Linux | macOS" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-ffb000?labelColor=121016&style=flat-square">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-ffb000?labelColor=121016&style=flat-square&logo=python&logoColor=white">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-ffb000?labelColor=121016&style=flat-square"></a>
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/DevEmperor/reelcast/releases/latest"><b>Download</b></a> ·
+  <a href="https://github.com/DevEmperor/Reelcast/releases/latest"><b>Download</b></a> ·
   <a href="#install">Install</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#faq">FAQ</a>
@@ -55,7 +55,7 @@
 
 ## Install
 
-Download the file for your system from the [latest release](https://github.com/DevEmperor/reelcast/releases/latest).
+Download the file for your system from the [latest release](https://github.com/DevEmperor/Reelcast/releases/latest).
 
 ### macOS 14.2 (Sonoma) or newer
 
@@ -108,15 +108,9 @@ Recordings go to `~/Music/Reelcast`:
 
 ## How it works
 
-```mermaid
-flowchart LR
-    S["Spotify app"] -- "audio" --> C{"capture<br>only Spotify"}
-    C -- "Linux: its own PipeWire output" --> R(("Reelcast"))
-    C -- "macOS: Core Audio process tap" --> R
-    S -. "now playing + position<br>MPRIS / AppleScript" .-> R
-    R --> F[("continuous<br>recording")]
-    F -- "cut in the silence,<br>pauses removed" --> O["MP3 / M4A / FLAC<br>+ tags + cover"]
-```
+<p align="center">
+  <img src="docs/images/how-it-works.png" alt="Spotify → capture → Reelcast → recording → your files" width="100%">
+</p>
 
 1. **Capture only Spotify.** On Linux, Spotify plays into a virtual PipeWire output of its own;
    on macOS a small Swift helper taps Spotify's processes directly (macOS 14.2+). You can listen
@@ -201,7 +195,7 @@ Not supported – Reelcast relies on PipeWire (Linux) and Core Audio process tap
 ## Building from source
 
 ```bash
-git clone https://github.com/DevEmperor/reelcast && cd reelcast
+git clone https://github.com/DevEmperor/Reelcast && cd Reelcast
 python3 -m reelcast --gui            # run straight from the source (Linux)
 packaging/build-linux.sh             # Arch package + tarball → dist/
 ```

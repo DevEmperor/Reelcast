@@ -211,6 +211,135 @@ def terminal_svg(path: Path) -> None:
     con.save_svg(str(path), title="reelcast --auto")
 
 
+# ---- how it works ------------------------------------------------------------------------
+
+
+def diagram(path: Path) -> None:
+    """Spotify → capture → Reelcast → recording → files, plus the player info path."""
+    w, h, scale = 1300, 250, 2
+    img = QImage(w * scale, h * scale, QImage.Format_ARGB32)
+    img.fill(QColor(BG))
+    p = QPainter(img)
+    p.scale(scale, scale)
+    p.setRenderHint(QPainter.Antialiasing)
+
+    def font(px: int, weight=QFont.Normal) -> QFont:
+        f = QFont()
+        f.setPixelSize(px)
+        f.setWeight(weight)
+        return f
+
+    def icon(kind: str, cx: float, cy: float) -> None:
+        amber = QPen(QColor(AMBER), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setBrush(Qt.NoBrush)
+        if kind == "note":
+            p.setPen(amber)
+            p.drawEllipse(QPointF(cx, cy), 16, 16)
+            p.setFont(font(20, QFont.Bold))
+            p.setPen(QColor(CREAM))
+            p.drawText(QRectF(cx - 16, cy - 17, 32, 32), Qt.AlignCenter, "♪")
+        elif kind == "funnel":
+            p.setPen(amber)
+            funnel = QPainterPath(QPointF(cx - 17, cy - 13))
+            funnel.lineTo(cx + 17, cy - 13)
+            funnel.lineTo(cx + 4, cy + 2)
+            funnel.lineTo(cx + 4, cy + 15)
+            funnel.lineTo(cx - 4, cy + 11)
+            funnel.lineTo(cx - 4, cy + 2)
+            funnel.closeSubpath()
+            p.drawPath(funnel)
+        elif kind == "cassette":
+            QSvgRenderer(str(ICON_SRC)).render(p, QRectF(cx - 20, cy - 20, 40, 40))
+        elif kind == "wave":
+            p.setPen(QPen(QColor(AMBER), 2.4, Qt.SolidLine, Qt.RoundCap))
+            for i in range(15):
+                amp = 3 + 12 * abs(math.sin(i * 0.8)) * (0.35 if i in (6, 7) else 1)
+                x = cx - 49 + i * 7
+                p.drawLine(QPointF(x, cy - amp), QPointF(x, cy + amp))
+            p.setPen(QPen(QColor(CREAM), 1.2, Qt.DashLine))
+            p.drawLine(QPointF(cx - 2.5, cy - 18), QPointF(cx - 2.5, cy + 18))
+        elif kind == "file":
+            p.setPen(amber)
+            doc = QPainterPath(QPointF(cx - 13, cy - 17))
+            doc.lineTo(cx + 5, cy - 17)
+            doc.lineTo(cx + 13, cy - 9)
+            doc.lineTo(cx + 13, cy + 17)
+            doc.lineTo(cx - 13, cy + 17)
+            doc.closeSubpath()
+            p.drawPath(doc)
+            p.setFont(font(13, QFont.Bold))
+            p.setPen(QColor(CREAM))
+            p.drawText(QRectF(cx - 13, cy - 8, 26, 24), Qt.AlignCenter, "♫")
+
+    card_w, card_h, top, gap = 184, 140, 24, 80
+    xs = [30 + i * (card_w + gap) for i in range(5)]
+    cards = [
+        ("note", "Spotify", "plays as usual"),
+        ("funnel", "Capture", "Linux: own PipeWire output, macOS: process tap"),
+        ("cassette", "Reelcast", "follows the player and measures the latency"),
+        ("wave", "Recording", "one continuous stream, cut in the silence"),
+        ("file", "Your files", "MP3 · M4A · FLAC with tags and cover art"),
+    ]
+    for x, (kind, title, text) in zip(xs, cards):
+        accent = kind == "cassette"
+        p.setPen(QPen(QColor(AMBER) if accent else QColor("#3a3440"), 2 if accent else 1.2))
+        p.setBrush(QColor("#1c1822"))
+        p.drawRoundedRect(QRectF(x, top, card_w, card_h), 16, 16)
+        icon(kind, x + card_w / 2, top + 34)
+        p.setFont(font(19, QFont.Bold))
+        p.setPen(QColor(AMBER if accent else CREAM))
+        p.drawText(QRectF(x, top + 58, card_w, 26), Qt.AlignHCenter | Qt.AlignVCenter, title)
+        p.setFont(font(12))
+        p.setPen(QColor(DIM))
+        p.drawText(QRectF(x + 12, top + 86, card_w - 24, 48), Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap, text)
+
+    def arrow(x1: float, x2: float, y: float, label: str) -> None:
+        p.setPen(QPen(QColor(AMBER), 2))
+        p.drawLine(QPointF(x1 + 8, y), QPointF(x2 - 10, y))
+        p.setBrush(QColor(AMBER))
+        p.setPen(Qt.NoPen)
+        tip = QPainterPath(QPointF(x2 - 6, y))
+        tip.lineTo(x2 - 15, y - 6)
+        tip.lineTo(x2 - 15, y + 6)
+        tip.closeSubpath()
+        p.drawPath(tip)
+        p.setFont(font(11))
+        p.setPen(QColor(CREAM))
+        p.drawText(QRectF(x1, y - 36, x2 - x1, 30), Qt.AlignHCenter | Qt.AlignBottom | Qt.TextWordWrap, label)
+
+    mid = top + card_h / 2
+    for i, label in enumerate(["audio", "only Spotify", "PCM", "complete tracks"]):
+        arrow(xs[i] + card_w, xs[i + 1], mid, label)
+
+    # player information: Spotify → Reelcast, underneath
+    y = top + card_h + 40
+    x1, x2 = xs[0] + card_w / 2, xs[2] + card_w / 2
+    p.setPen(QPen(QColor(DIM), 1.6, Qt.DashLine))
+    p.setBrush(Qt.NoBrush)
+    route = QPainterPath(QPointF(x1, top + card_h + 4))
+    route.lineTo(x1, y)
+    route.lineTo(x2, y)
+    route.lineTo(x2, top + card_h + 12)
+    p.drawPath(route)
+    p.setBrush(QColor(DIM))
+    p.setPen(Qt.NoPen)
+    tip = QPainterPath(QPointF(x2, top + card_h + 4))
+    tip.lineTo(x2 - 6, top + card_h + 14)
+    tip.lineTo(x2 + 6, top + card_h + 14)
+    tip.closeSubpath()
+    p.drawPath(tip)
+    p.setFont(font(12))
+    p.setPen(QColor(CREAM))
+    p.drawText(QRectF(x1, y + 8, x2 - x1, 22), Qt.AlignHCenter | Qt.AlignTop,
+               "what's playing and where – 10× a second (MPRIS / AppleScript)")
+    p.setPen(QColor(DIM))
+    p.setFont(font(12))
+    p.drawText(QRectF(xs[3], y - 6, xs[4] + card_w - xs[3], 44), Qt.AlignHCenter | Qt.AlignTop,
+               "skipped tracks, ads and jumps are left out")
+    p.end()
+    img.save(str(path))
+
+
 # ---- banner --------------------------------------------------------------------------------
 
 
@@ -272,6 +401,7 @@ def main() -> int:
     shot_episode(OUT / "app-episode.png")
     terminal_svg(OUT / "terminal-auto.svg")
     banner(OUT / "banner.png", OUT / "app-auto-record.png")
+    diagram(OUT / "how-it-works.png")
     for f in sorted(OUT.iterdir()):
         print(f.relative_to(ROOT), f.stat().st_size // 1024, "KB")
     return 0
