@@ -157,13 +157,14 @@ def record(
 def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None:
     started = time.monotonic()
     reseeked = False
-    position_checked = False
+    restarts = 0
+    last_pos: tuple[float, float] | None = None  # (position, content) at the previous tick
     paused_since: float | None = None
     warned_pause = warned_silence = False
     # Spotify doesn't report its podcast speed (the MPRIS rate stays 1.0), so it's measured:
     # progress of Spotify's position divided by progress of the recorded audio.
     # Both stand still while buffering, so the ratio stays meaningful then too.
-    speed_ref: tuple[float, float] | None = None  # (Position, Inhalt)
+    speed_ref: tuple[float, float] | None = None  # (position, content)
     speed_strikes = 0
 
     while True:
@@ -183,19 +184,29 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
                 cap.mark_restart()
                 sp.set_position(trackid, 0)
                 reseeked = True
-                speed_ref = None
+                speed_ref = last_pos = None
                 continue
             reporter.warn("Spotify rebuilt its audio stream – routed it again.")
 
-        if not position_checked and now - started > 2.0 and status == "Playing":
-            position_checked = True
-            pos = sp.position()
-            if pos is not None and pos > content + 6 and not reseeked:
+        # Spotify sometimes jumps to its remembered podcast position on its own, right after
+        # playback starts – even after we asked for 0:00. Early on: just start over.
+        pos = sp.position() if status == "Playing" else None
+        if pos is not None and last_pos is not None:
+            jump = (pos - last_pos[0]) - (content - last_pos[1])
+            if abs(jump) > 2.0 and content < 20 and restarts < 3:
+                restarts += 1
                 cap.mark_restart()
                 sp.set_position(trackid, 0)
-                reseeked = True
-                speed_ref = None
+                speed_ref = last_pos = None
+                cancel.sleep(0.5)
                 continue
+        last_pos = (pos, content) if pos is not None else None
+        if not reseeked and now - started > 2.0 and pos is not None and pos > content + 6:
+            cap.mark_restart()
+            sp.set_position(trackid, 0)
+            reseeked = True
+            speed_ref = last_pos = None
+            continue
 
         if status == "Playing" and cap.first_sound is not None:
             pos = sp.position()

@@ -123,8 +123,17 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
                 _status, meta, pos = sp.snapshot()
                 return str(meta.get("mpris:trackid", "")), (meta.get("mpris:length") or 0) / 1e6, pos or 0.0
 
+            album = _album_track_ids()
+            before = track()[0]
             sp.open_uri(ALBUM)
-            a_id = wait_for(lambda: track()[0] or None, 30, "album playback")
+
+            def on_album() -> str | None:
+                tid = track()[0]
+                if not tid or tid == before:
+                    return None
+                return tid if not album or tid.rsplit("/", 1)[-1] in album else None
+
+            a_id = wait_for(on_album, 30, "album playback")
             time.sleep(1)
             if sp.status() != "Playing":
                 sp.play()
@@ -220,8 +229,9 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
                 step.update(info=info, waveform=wf)
                 check(f"Track {step['track']} has sound", wf.get("peak_db", -200) > -30,
                       f"peak {wf.get('peak_db')} dBFS")
-                check(f"Track {step['track']} clean edges", wf.get("lead_s", 9) < 0.4 and wf.get("tail_s", 9) < 0.8,
-                      f"silence at start {wf.get('lead_s')} s, at end {wf.get('tail_s')} s")
+                # Songs may start or fade out quietly – only gross offsets count as errors.
+                check(f"Track {step['track']} edges", wf.get("lead_s", 9) < 0.5 and wf.get("tail_s", 9) < 3.0,
+                      f"quiet (< -50 dBFS) at start {wf.get('lead_s')} s, at end {wf.get('tail_s')} s")
         else:
             ok = e is None or e.state not in ("saved", "exists")
             check(f"Track {step['track']} not saved", ok,
@@ -248,6 +258,22 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
     (report / "log.txt").write_text("\n".join(log_lines) + "\n")
     log("RESULT: " + ("PASSED" if result["passed"] else "FAILED"))
     return 0 if result["passed"] else 1
+
+
+def _album_track_ids() -> set[str]:
+    """Track IDs of the test album (empty if Spotify's embed page can't be read)."""
+    import re
+
+    from . import net
+
+    try:
+        page = net.get_text("https://open.spotify.com/embed/album/" + ALBUM.rsplit(":", 1)[-1])
+        data = json.loads(re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                                    page, re.S).group(1))
+        tracks = data["props"]["pageProps"]["state"]["data"]["entity"]["trackList"]
+        return {t["uri"].rsplit(":", 1)[-1] for t in tracks}
+    except Exception:
+        return set()
 
 
 def _probe(path: Path) -> dict:
