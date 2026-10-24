@@ -8,7 +8,7 @@ VER=$(python3 -c "import reelcast; print(reelcast.__version__)")
 mkdir -p dist
 rm -f dist/reelcast-$VER*.{tar.gz,pkg.tar.zst}
 git archive --format=tar.gz --prefix="reelcast-$VER/" -o "dist/reelcast-$VER-linux.tar.gz" HEAD \
-    reelcast install.sh README.md
+    reelcast install.sh README.md LICENSE
 WORK=$(mktemp -d)
 cp packaging/arch/PKGBUILD "$WORK/"
 cp "dist/reelcast-$VER-linux.tar.gz" "$WORK/reelcast-$VER.tar.gz"

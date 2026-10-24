@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build Reelcast.app and Reelcast-<version>-macOS.dmg (run on macOS 14.2+ with the
-# Command Line Tools). Expects the dev environment from docs/macos-test-vm.md:
+# Command Line Tools). Expects:
 #   ~/reelcast-dev/venv (Python 3.13 + PySide6-Essentials, numpy, rich, pyinstaller)
 #   ~/reelcast-dev/ffbuild/{ffmpeg,ffprobe} (LGPL build from build-ffmpeg-mac.sh)
 set -euo pipefail
@@ -44,6 +44,9 @@ rm -rf "$STAGE" && mkdir -p "$STAGE"
 cp -R dist/Reelcast.app "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 cp "$ROOT/macos/README-macOS.txt" "$STAGE/Read me first.txt"
+mkdir -p "$STAGE/Licenses"
+cp "$ROOT/LICENSE" "$STAGE/Licenses/Reelcast (MIT).txt"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT"/licenses/*.txt "$STAGE/Licenses/"
 DMG="dist/Reelcast-$VERSION-macOS.dmg"
 rm -f "$DMG"
 hdiutil create -volname "Reelcast $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null

@@ -4,7 +4,7 @@ pkgver=1.0.0
 pkgrel=1
 pkgdesc="Record podcasts and music from Spotify, track by track (PipeWire)"
 arch=('any')
-license=('custom')
+license=('MIT')
 depends=('python' 'pyside6' 'python-numpy' 'python-rich' 'python-gobject'
          'pipewire' 'libpulse' 'ffmpeg')
 optdepends=('flatpak: for the Spotify Flatpak'
@@ -35,4 +35,5 @@ Categories=AudioVideo;Audio;Recorder;
 StartupWMClass=reelcast
 DESK
     install -Dm644 README.md "${pkgdir}/usr/share/doc/reelcast/README.md"
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/reelcast/LICENSE"
 }
