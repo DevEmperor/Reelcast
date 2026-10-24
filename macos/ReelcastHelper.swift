@@ -129,6 +129,10 @@ final class SpotifyTap {
     let listen: Bool
     let writer = PCMWriter()
     private let control = DispatchQueue(label: "reelcast.tap.control")
+    // Creating a tap blocks for as long as macOS asks whether Reelcast may record audio – so
+    // it runs on its own queue, and the silence padding keeps the stream going meanwhile.
+    private let builder = DispatchQueue(label: "reelcast.tap.build")
+    private var building = false  // control queue only
     private var processes: [AudioObjectID] = []
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -173,9 +177,16 @@ final class SpotifyTap {
     /// in real time, just like PipeWire's monitor does on Linux.
     private func tick() {
         ticks += 1
-        if ticks % 50 == 1 {
+        if ticks % 50 == 1 && !building {
             let current = spotifyProcesses()
-            if current != processes { rebuild(current) }
+            if current != processes {
+                processes = current
+                building = true
+                builder.async { [weak self] in
+                    self?.rebuild(current)
+                    self?.control.async { self?.building = false }
+                }
+            }
         }
         let t = now()
         var pad = 0
@@ -221,7 +232,6 @@ final class SpotifyTap {
 
     private func rebuild(_ current: [AudioObjectID]) {
         teardown()
-        processes = current
         guard !current.isEmpty else {
             emit(["event": "tap", "processes": 0])
             return
@@ -376,10 +386,13 @@ final class SpotifyTap {
     }
 
     func stop() {
-        control.sync {
-            timer?.cancel()
-            teardown()
+        control.sync { timer?.cancel() }
+        let done = DispatchSemaphore(value: 0)
+        builder.async { [weak self] in
+            self?.teardown()
+            done.signal()
         }
+        _ = done.wait(timeout: .now() + 2)  // a tap still waiting for permission dies with us
     }
 }
 
