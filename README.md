@@ -13,8 +13,10 @@ records what Spotify plays anyway.
 **Auto Record** – Reelcast runs in the background and records everything you
 play in Spotify on this computer. Every track becomes its own file.
 
-- Cuts come from Spotify's playback position and land within a few
-  milliseconds. If there's silence at a boundary, the cut goes right there.
+- Cuts come from Spotify's playback position. Spotify reports it only to about
+  ±0.2 s, so Reelcast puts every cut into the silence between tracks – nothing
+  of a song is cut off and nothing of the neighbouring track leaks in. On
+  gapless albums (live albums, DJ mixes) a cut can be up to ~0.2 s off.
 - Pauses and buffering are removed; intended silence inside a track stays.
 - Only complete tracks are saved. Skipped or seeked tracks, ads and local
   files are discarded.
