@@ -45,6 +45,7 @@ SPEED_TOL = 0.04
 DEBUG = bool(os.environ.get("REELCAST_DEBUG"))
 QUIET = 10 ** (-85 / 20)  # silence for fine cutting (practically digital zero)
 ZERO = 1e-6  # digital zero (pause/buffering)
+SOUND = 10 ** (-60 / 20)  # a track whose loudest moment stays below this was not recorded
 
 # Session states for front ends – the display text is up to them.
 WAITING = "waiting"  # Spotify isn't running
@@ -102,6 +103,7 @@ class _Item:
     speed: float | None = None
     prev_boundary: "_Boundary | None" = None
     late_start: bool = False  # audio reached the recording late – don't trust its start
+    warned_silent: bool = False
 
 
 class _Boundary:
@@ -187,6 +189,7 @@ class AutoSession:
         next_route = 0.0
         warned_volume = False
         warned_problem = ""
+        n_streams = 1
 
         def show(text: str) -> None:
             nonlocal shown
@@ -210,7 +213,7 @@ class AutoSession:
                     continue
                 if now >= next_route:
                     next_route = now + ROUTE_EVERY
-                    sink.route()
+                    n_streams, _ = sink.route()
                     if sink.enforce_full_volume() and not warned_volume:
                         warned_volume = True
                         self.rep.info("Spotify stays at 100 % while recording – use your system volume instead.")
@@ -244,6 +247,7 @@ class AutoSession:
                     continue
 
                 self._track(item, status, pos, frame, now)
+                self._check_sound(item, status, cap, n_streams)
                 show(PAUSED if status == "Paused" else (RECORDING if item.seg else IGNORED))
                 self.rep.position(pos, item.entry.length)
         except Cancelled:
@@ -325,6 +329,22 @@ class AutoSession:
             if item.prev_boundary:
                 item.prev_boundary.set(statistics.median(item.z_runs[0]) if item.z_runs[0] else None)
         item.last_pos, item.last_wall, item.last_frame = pos, now, frame
+
+    def _check_sound(self, item: _Item, status: str, cap: StreamCapture, n_streams: int) -> None:
+        """Spotify plays, but nothing arrives – most likely Spotify Connect plays elsewhere."""
+        if status != "Playing" or item.seg is None or item.warned_silent:
+            return
+        if cap.silent_for > 8 and n_streams == 0:
+            item.warned_silent = True
+            if item.entry.state == "recording":
+                item.entry.state, item.entry.reason = "partial", "not playing on this computer"
+                self.rep.entry(item.entry)
+            self.rep.warn("Spotify is playing, but not on this computer (Spotify Connect). "
+                          "Pick “This computer” in Spotify – nothing is recorded until then.")
+        elif cap.silent_for > 15:
+            item.warned_silent = True
+            self.rep.warn("No sound has arrived from Spotify for 15 s – is it playing on another "
+                          "device (Spotify Connect)?")
 
     def _restart(self, sp: Spotify, item: _Item, cap: StreamCapture) -> bool:
         """Spotify's stream arrived only after the track began → start missing: restart once."""
@@ -432,6 +452,11 @@ class AutoSession:
             boundary.ready.wait(3.0)
             # Gapless transition: the start of the next track is the more precise end
             if boundary.z is not None and abs(boundary.z - end) < 0.5 * RATE:
+                # Spotify's position can run ahead of its audio after a skip or a fresh
+                # start (it counts while still buffering). The same offset then shows up
+                # between this track's own end estimate and the clean boundary – apply it
+                # to the start as well.
+                start += boundary.z - end
                 end = boundary.z
         if seg.error:
             raise RuntimeError(seg.error)
@@ -458,6 +483,9 @@ class AutoSession:
                   f"low {[round(v / RATE * 1000) for v in self._lat_low]} "
                   f"high {[round(v / RATE * 1000) for v in self._lat_high]}", file=sys.stderr)
         e_cut = min(e_cut, seg.frames)
+        span = env[max(0, s_cut // ENV_BLOCK): max(0, e_cut // ENV_BLOCK)]
+        if not len(span) or max(span) < SOUND:
+            raise RuntimeError("no sound was recorded – was Spotify playing on another device?")
         keep = _without_stalls([(s_cut, e_cut)], stalls, seg.first_frame, env)
         total = sum(b - a for a, b in keep) / RATE
         if total < entry.length - 3:

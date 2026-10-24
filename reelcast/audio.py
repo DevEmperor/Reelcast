@@ -524,6 +524,7 @@ class StreamCapture:
         self.error: str | None = None
         self._ring: deque[tuple[int, np.ndarray]] = deque()
         self._ring_frames = 0
+        self._last_sound = 0  # frame after the last non-silent sample
         self._segments: list[Segment] = []
         self._rec: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
@@ -551,6 +552,11 @@ class StreamCapture:
             segs, self._segments = self._segments, []
         for seg in segs:
             seg.close()
+
+    @property
+    def silent_for(self) -> float:
+        """Seconds of digital silence at the end of what has been captured."""
+        return (self.frames - self._last_sound) / RATE
 
     def open_segment(self, start_frame: int, name: str) -> Segment:
         """New file from `start_frame` (may lie up to `preroll` in the past)."""
@@ -604,6 +610,8 @@ class StreamCapture:
                     while self._ring and self._ring_frames - len(self._ring[0][1]) >= self.preroll:
                         self._ring_frames -= len(self._ring.popleft()[1])
                     self.frames = base + len(frames)
+                    if len(frames) and float(np.abs(frames).max()) > SILENCE_EPS:
+                        self._last_sound = self.frames
                 self._started.set()
                 if self.on_level:
                     peak = float(np.abs(frames).max()) if len(frames) else 0.0

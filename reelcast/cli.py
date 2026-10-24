@@ -494,12 +494,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--show-spotify", action="store_true", help="don't minimize a Spotify that Reelcast starts")
     p.add_argument("--check", action="store_true", help="check the system (PipeWire, ffmpeg, Spotify)")
     p.add_argument("--gui", action="store_true", help="open the graphical interface")
+    p.add_argument("--selftest", type=Path, metavar="DIR",
+                   help="end-to-end test with the real Spotify app; writes a report to DIR")
     p.add_argument("--version", action="version", version=f"Reelcast {__version__}")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.selftest:
+        import os
+
+        if sys.platform != "darwin":
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from .selftest import run as selftest
+
+        return selftest(args.selftest, listen=args.listen)
     if args.gui:
         from .gui import main as gui_main
 
