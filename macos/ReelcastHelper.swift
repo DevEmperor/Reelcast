@@ -438,10 +438,15 @@ else
 end if
 """
 
+// The state is read again right after the position: a pause or play in between makes
+// Spotify's position jump (to what is audible), so such a sample is dropped.
 let positionScript = """
 if application "Spotify" is running then
-    tell application "Spotify" to set p to player position
-    return (round (p * 1000)) as text
+    tell application "Spotify"
+        set p to player position
+        set s to player state as string
+    end tell
+    return ((round (p * 1000)) as text) & "\(separator)" & s
 else
     return "not running"
 end if
@@ -546,9 +551,10 @@ final class SpotifyState {
             trackID = id
         }
         let before = Date().timeIntervalSince1970
-        let (ms, positionError) = run(position)
+        let (reply, positionError) = run(position)
         let after = Date().timeIntervalSince1970
-        guard positionError == nil, let ms = ms, let value = Double(ms) else { return nil }
+        guard positionError == nil, let parts = reply?.components(separatedBy: separator), parts.count == 2,
+              let value = Double(parts[0]), parts[1] == f[0] else { return nil }
         var state: [String: Any] = [
             "running": true, "status": f[0], "volume": Int(f.count > 1 ? f[1] : "") ?? 100,
             "position": value / 1000.0, "t": (before + after) / 2, "posSpan": after - before,
