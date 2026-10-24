@@ -117,7 +117,10 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
             _start_spotify(sp, log)
             log("Spotify is running")
             ask("auto", True)
-            wait_for(lambda: win.status_code in ("ready", "waiting", "recording", "paused"), 30, "Auto Record")
+            if PLATFORM == "macOS":  # recording starts once "record system audio" is allowed
+                log("macOS may ask to allow audio recording – waiting for Auto Record (up to 5 min)")
+            wait_for(lambda: win.status_code in ("ready", "waiting", "recording", "paused"),
+                     300 if PLATFORM == "macOS" else 30, "Auto Record")
             time.sleep(2)
             ask("shot", "01-auto-record-ready")
             if PLATFORM == "macOS":
