@@ -301,9 +301,9 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
     if not keep_audio and out_dir.exists():
         shutil.rmtree(out_dir)  # the test only needs the evidence, not the music
         log("recorded audio deleted (evidence: screenshots, waveforms, result.json)")
+    log("RESULT: " + ("PASSED" if result["passed"] else "FAILED"))
     (report / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str))
     (report / "log.txt").write_text("\n".join(log_lines) + "\n")
-    log("RESULT: " + ("PASSED" if result["passed"] else "FAILED"))
     return 0 if result["passed"] else 1
 
 

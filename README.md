@@ -30,6 +30,8 @@ play in Spotify on this computer. Every track becomes its own file.
   of a song is cut off and nothing of the neighbouring track leaks in. On
   gapless albums (live albums, DJ mixes) a cut can be up to ~0.2 s off.
 - Pauses and buffering are removed; intended silence inside a track stays.
+  On macOS a pause in the middle of a track can leave a short gap (up to about
+  0.5 s) where you paused.
 - Only complete tracks are saved. Skipped or seeked tracks, ads and local
   files are discarded.
 - Podcasts have to play at **1×** in Spotify. Other speeds are detected and
