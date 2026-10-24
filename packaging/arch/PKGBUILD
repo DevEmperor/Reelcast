@@ -1,0 +1,38 @@
+# Maintainer: DevEmperor
+pkgname=reelcast
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Record podcasts and music from Spotify, track by track (PipeWire)"
+arch=('any')
+license=('custom')
+depends=('python' 'pyside6' 'python-numpy' 'python-rich' 'python-gobject'
+         'pipewire' 'libpulse' 'ffmpeg')
+optdepends=('flatpak: for the Spotify Flatpak'
+            'spotify-launcher: native Spotify client')
+source=("reelcast-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "reelcast-${pkgver}"
+    install -d "${pkgdir}/usr/lib/reelcast"
+    cp -r reelcast "${pkgdir}/usr/lib/reelcast/"
+    find "${pkgdir}/usr/lib/reelcast" -name '__pycache__' -prune -exec rm -rf {} +
+    install -Dm755 /dev/stdin "${pkgdir}/usr/bin/reelcast" <<'SH'
+#!/bin/sh
+exec python3 -c 'import sys; sys.path.insert(0, "/usr/lib/reelcast"); from reelcast.cli import main; sys.exit(main())' "$@"
+SH
+    install -Dm644 reelcast/assets/reelcast.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/reelcast.svg"
+    install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/reelcast.desktop" <<'DESK'
+[Desktop Entry]
+Type=Application
+Name=Reelcast
+GenericName=Spotify Recorder
+Comment=Record podcasts and music from Spotify, track by track
+Exec=reelcast --gui
+Icon=reelcast
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+StartupWMClass=reelcast
+DESK
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/reelcast/README.md"
+}

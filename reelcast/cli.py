@@ -17,7 +17,7 @@ from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
-from . import __version__, doctor, session as sess
+from . import __version__, doctor, encode, session as sess
 from .engine import Engine, default_out_dir
 from .model import (
     PHASE_ENCODING,
@@ -484,7 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Auto Record: record everything Spotify plays, track by track")
     p.add_argument("-l", "--list", type=Path, metavar="FILE", help="file with links (one per line)")
     p.add_argument("-o", "--output", type=Path, metavar="DIR", help=f"output folder (default: {default_out_dir()})")
-    p.add_argument("-f", "--format", choices=("mp3", "m4a", "opus", "flac"), default="mp3")
+    p.add_argument("-f", "--format", choices=tuple(encode.FORMATS), default="mp3")
     p.add_argument("-q", "--quality", type=int, default=2, choices=range(10), metavar="0-9",
                    help="MP3 VBR level, 0 = best (default 2 ≈ 190 kbit/s)")
     p.add_argument("--listen", action="store_true", help="hear single-episode recordings through the speakers")

@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from . import __version__, net, tools
 from .model import CancelToken, Episode, ReelcastError, Reporter
 
+# Opus needs libopus, which the macOS build of ffmpeg leaves out.
 FORMATS = {
     # extension: (ffmpeg muxer, codec name per ffprobe, encoder arguments, cover supported)
     "mp3": ("mp3", "mp3", lambda q: ["-c:a", "libmp3lame", "-q:a", str(q)], True),
@@ -18,6 +20,8 @@ FORMATS = {
     "opus": ("ogg", "opus", lambda q: ["-c:a", "libopus", "-b:a", "96k"], False),
     "flac": ("flac", "flac", lambda q: ["-c:a", "flac"], True),
 }
+if sys.platform == "darwin":
+    del FORMATS["opus"]
 
 
 def probe(path: Path) -> tuple[float, str]:

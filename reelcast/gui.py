@@ -677,7 +677,7 @@ class MainWindow(QMainWindow):
         openb.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.out_dir))))
         foot.addWidget(openb)
         self.fmt = QComboBox()
-        for f in ("mp3", "m4a", "opus", "flac"):
+        for f in encode.FORMATS:
             self.fmt.addItem(f.upper(), f)
         self.fmt.setCurrentIndex(max(0, self.fmt.findData(self.settings.value("format", "mp3"))))
         self.fmt.currentIndexChanged.connect(lambda: self.settings.setValue("format", self.fmt.currentData()))

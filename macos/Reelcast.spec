@@ -1,8 +1,11 @@
 # PyInstaller spec for Reelcast.app (macOS). Build with macos/build-app.sh.
 import os
-from reelcast import __version__
+import sys
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
+sys.path.insert(0, ROOT)
+from reelcast import __version__  # noqa: E402
+
 FF = os.path.expanduser("~/reelcast-dev/ffbuild")
 
 a = Analysis(
