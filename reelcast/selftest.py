@@ -29,6 +29,7 @@ import numpy as np
 
 ALBUM = "spotify:album:4C4LvbYS0pxXLW5sGD9EK5"
 EPISODE = "https://open.spotify.com/episode/6L4teFulT1MD53bBA3vFkz"
+WARMUP = "spotify:track:0WDBs60pTRESRkt7FsMmoQ"  # not on the test album
 PLATFORM = "macOS" if sys.platform == "darwin" else "Linux"
 
 
@@ -111,12 +112,14 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
         sp = Spotify()
         try:
             log(f"Platform {PLATFORM}, listen={listen}")
-            sp.ensure_running(CancelToken(), minimize=True)
+            _start_spotify(sp, log)
             log("Spotify is running")
             ask("auto", True)
             wait_for(lambda: win.status_code in ("ready", "waiting", "recording", "paused"), 30, "Auto Record")
             time.sleep(2)
             ask("shot", "01-auto-record-ready")
+            if PLATFORM == "macOS":
+                _warm_up(sp, win, log, wait_for)
             time.sleep(1)
 
             def track() -> tuple[str, float, float]:
@@ -258,6 +261,49 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
     (report / "log.txt").write_text("\n".join(log_lines) + "\n")
     log("RESULT: " + ("PASSED" if result["passed"] else "FAILED"))
     return 0 if result["passed"] else 1
+
+
+def _start_spotify(sp, log) -> None:
+    """Start Spotify; on a Mac wait (up to 5 min) until "control Spotify" is allowed."""
+    from .model import CancelToken, ReelcastError
+
+    deadline = time.monotonic() + 300
+    asked = False
+    while True:
+        try:
+            sp.ensure_running(CancelToken(), minimize=True)
+            sp.snapshot()
+            if not getattr(sp, "last_error", ""):
+                return
+            raise ReelcastError(sp.last_error)
+        except ReelcastError as e:
+            if "allowed" not in str(e) or time.monotonic() > deadline:
+                raise
+            if not asked:
+                log("macOS asks: allow Reelcast to control Spotify – waiting for the click")
+                asked = True
+            time.sleep(2)
+
+
+def _warm_up(sp, win, log, wait_for) -> None:
+    """Play a few seconds of another track until sound arrives (macOS: "record audio" prompt)."""
+    from .model import ReelcastError
+
+    log("Warm-up: macOS may ask to allow audio recording – waiting for sound (up to 5 min)")
+    deadline = time.monotonic() + 300
+    while True:
+        try:
+            sp.open_uri(WARMUP)
+            break
+        except ReelcastError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(2)
+    wait_for(lambda: any(db > -60 for db in list(win.cassette.levels)), 300, "sound from Spotify", poll=0.5)
+    log("Sound arrives – permissions are in place")
+    time.sleep(2)
+    sp.pause()
+    time.sleep(3)
 
 
 def _album_track_ids() -> set[str]:
