@@ -32,6 +32,8 @@ Good to know
   - Spotify stays at 100 % volume while recording; use the system volume.
   - Turn off Crossfade and Automix in Spotify's settings for clean cuts.
   - Podcasts must play at 1x speed.
+  - Pausing in the middle of a track can leave a short gap (up to about
+    0.5 s) where you paused.
   - On Apple silicon Macs, Reelcast runs through Rosetta 2 (macOS offers to
     install it if needed).
 
