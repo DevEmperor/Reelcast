@@ -6,7 +6,8 @@
 //                                    Without --listen, Spotify is muted while tapped.
 //                                    Events go to stderr as JSON lines.
 //   reelcast-helper state [--interval S]
-//                                    Streams Spotify's player state as JSON lines.
+//                                    Streams Spotify's player state as JSON lines
+//                                    ("pending": true while macOS asks for permission).
 //   reelcast-helper control <command> [argument]
 //                                    play | pause | next | open URI | seek SECONDS | volume 0-100 | quit
 //   reelcast-helper check            Permission and device overview as JSON.
@@ -382,6 +383,53 @@ else
 end if
 """
 
+/// Whether Spotify's main executable is running – from the process list, so no Apple Events needed.
+func spotifyRunning() -> Bool {
+    var pids = [pid_t](repeating: 0, count: Int(max(proc_listallpids(nil, 0), 0)) + 64)
+    let n = Int(proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size)))
+    var path = [CChar](repeating: 0, count: 4096)
+    for pid in pids.prefix(max(n, 0)) where pid > 0 {
+        if proc_pidpath(pid, &path, UInt32(path.count)) > 0,
+           String(cString: path).hasSuffix("/Spotify.app/Contents/MacOS/Spotify") { return true }
+    }
+    return false
+}
+
+/// The `state` stream. AppleScript blocks while macOS asks the user to allow controlling
+/// Spotify (or while the screen is locked and it can't ask), so a watchdog keeps the stream
+/// alive in the meantime: "running" from the process list, plus "pending": true.
+final class StateStream: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastSent = Date()
+
+    init() {
+        let thread = Thread { [unowned self] in self.watch() }
+        thread.name = "state-watchdog"
+        thread.start()
+    }
+
+    func send(_ state: [String: Any]) {
+        var state = state
+        state["t"] = Date().timeIntervalSince1970
+        lock.lock()
+        emit(state, to: .standardOutput)
+        lastSent = Date()
+        lock.unlock()
+    }
+
+    private func watch() {
+        while true {
+            Thread.sleep(forTimeInterval: 0.5)
+            lock.lock()
+            let quiet = Date().timeIntervalSince(lastSent)
+            lock.unlock()
+            if quiet > 1.0 {
+                send(spotifyRunning() ? ["running": true, "pending": true] : ["running": false])
+            }
+        }
+    }
+}
+
 func spotifyState(script: NSAppleScript) -> [String: Any] {
     var error: NSDictionary?
     let result = script.executeAndReturnError(&error)
@@ -469,10 +517,9 @@ case "state":
     guard let script = NSAppleScript(source: stateScript) else { fail("could not compile state script") }
     var compileError: NSDictionary?
     script.compileAndReturnError(&compileError)
-    while true {
-        var state = spotifyState(script: script)
-        state["t"] = Date().timeIntervalSince1970
-        emit(state, to: .standardOutput)
+    let stream = StateStream()
+    while true {  // NSAppleScript stays on the main thread
+        stream.send(spotifyState(script: script))
         Thread.sleep(forTimeInterval: interval)
     }
 

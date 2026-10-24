@@ -272,6 +272,9 @@ def _start_spotify(sp, log) -> None:
     deadline = time.monotonic() + 300
     asked = False
     while True:
+        if not asked and sp.running() and "allowed" in getattr(sp, "last_error", ""):
+            log("macOS asks: allow Reelcast to control Spotify – waiting for the click")
+            asked = True
         try:
             sp.ensure_running(CancelToken(), minimize=True)
             sp.snapshot()

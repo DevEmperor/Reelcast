@@ -22,6 +22,11 @@ AUTOMATION_HINT = (
     "Reelcast isn't allowed to control Spotify. Allow it under System Settings → "
     "Privacy & Security → Automation → Reelcast → Spotify."
 )
+PERMISSION_PENDING = (
+    "macOS is asking whether Reelcast is allowed to control Spotify – click “Allow” in that "
+    "dialog (unlock the screen first if it is locked)."
+)
+PERMISSION_WAIT = 120  # seconds to wait for that click
 AUDIO_HINT = (
     "Reelcast isn't allowed to record Spotify's audio. Allow it under System Settings → "
     "Privacy & Security → Screen & System Audio Recording."
@@ -105,7 +110,9 @@ class MacSpotify:
 
     def _state(self) -> dict:
         st = _StateReader.get().latest()
-        if st.get("errorNumber") == NOT_AUTHORIZED:
+        if st.get("pending"):
+            self.last_error = PERMISSION_PENDING
+        elif st.get("errorNumber") == NOT_AUTHORIZED:
             self.last_error = AUTOMATION_HINT
         elif "error" in st:
             self.last_error = str(st["error"])
@@ -175,20 +182,24 @@ class MacSpotify:
     # ---- start / end ----------------------------------------------------------------
 
     def ensure_running(self, cancel: CancelToken, minimize: bool, timeout: float = 45) -> None:
-        if self.running():
-            return
-        args = ["open", "-g", "-a", "Spotify"]
-        if minimize:
-            args.insert(2, "-j")  # launch hidden
-        if subprocess.run(args, capture_output=True).returncode != 0:
-            raise ReelcastError("Spotify isn't installed (expected /Applications/Spotify.app).")
-        self.launched_by_us = True
-        deadline = time.monotonic() + timeout
-        while not self.running():
+        if not self.running():
+            args = ["open", "-g", "-a", "Spotify"]
+            if minimize:
+                args.insert(2, "-j")  # launch hidden
+            if subprocess.run(args, capture_output=True).returncode != 0:
+                raise ReelcastError("Spotify isn't installed (expected /Applications/Spotify.app).")
+            self.launched_by_us = True
+            deadline = time.monotonic() + timeout
+            while not self.running():
+                if time.monotonic() > deadline:
+                    raise ReelcastError("Spotify didn't start (timed out).")
+                cancel.sleep(0.3)
+            cancel.sleep(3.0)  # the client needs a moment before it accepts commands
+        deadline = time.monotonic() + PERMISSION_WAIT
+        while self.running() and self.last_error == PERMISSION_PENDING:
             if time.monotonic() > deadline:
-                raise ReelcastError("Spotify didn't start (timed out).")
-            cancel.sleep(0.3)
-        cancel.sleep(3.0)  # the client needs a moment before it accepts commands
+                break
+            cancel.sleep(0.5)
         if self.last_error:
             raise ReelcastError(self.last_error)
 
