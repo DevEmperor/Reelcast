@@ -234,6 +234,10 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
             ask("auto", False)
             time.sleep(5)
         finally:
+            try:
+                sp.quit()  # only if the test started Spotify itself
+            except Exception:  # noqa: BLE001
+                pass
             ask("quit")
 
     threading.Thread(target=drive, name="selftest-driver", daemon=True).start()
