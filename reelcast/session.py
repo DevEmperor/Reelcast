@@ -46,6 +46,7 @@ DEBUG = bool(os.environ.get("REELCAST_DEBUG"))
 QUIET = 10 ** (-85 / 20)  # silence for fine cutting (practically digital zero)
 ZERO = 1e-6  # digital zero (pause/buffering)
 MIN_STALL = 0.2  # a standing position counts as buffering from this long (and is cut from it)
+SETTLE = 2.0  # after pause/resume, Spotify for Mac moves its position by up to ~1.2 s
 SOUND = 10 ** (-60 / 20)  # a track whose loudest moment stays below this was not recorded
 
 # Session states for front ends – the display text is up to them.
@@ -105,6 +106,8 @@ class _Item:
     prev_boundary: "_Boundary | None" = None
     late_start: bool = False  # audio reached the recording late – don't trust its start
     warned_silent: bool = False
+    last_status: str = ""
+    toggled_at: float = 0.0  # when playback was last paused or resumed
 
 
 class _Boundary:
@@ -306,8 +309,19 @@ class AutoSession:
     def _track(self, item: _Item, status: str, pos: float, frame: int, now: float) -> None:
         dt = now - item.last_wall
         dpos = pos - item.last_pos
+        if item.last_status and status != item.last_status:
+            item.toggled_at = now
+        item.last_status = status
+        # Right after a pause or resume the reported position settles (it jumps to what is
+        # audible and back). Small jumps then are no seek, and the samples don't go into
+        # the timing. Not at the start of a track: a jump there means it didn't start at 0.
+        settling = item.toggled_at and now - item.toggled_at < SETTLE
         if status == "Playing" and dt > 0:
-            if dpos < -0.5 or dpos > dt + 1.0:
+            if settling and (dpos < -0.5 or dpos > dt + 1.0) and abs(dpos - dt) < 2.0:
+                if DEBUG:
+                    print(f"[session] position settles after pause/resume in {item.entry.title!r}: "
+                          f"{item.last_pos:.2f} → {pos:.2f} s", file=sys.stderr)
+            elif dpos < -0.5 or dpos > dt + 1.0:
                 if DEBUG:
                     print(f"[session] seek in {item.entry.title!r}: {item.last_pos:.2f} → {pos:.2f} s "
                           f"within {dt:.2f} s", file=sys.stderr)
@@ -328,7 +342,8 @@ class AutoSession:
                     item.stall_open = None
                 item.played += dt
                 item.advanced += dpos
-                item.z_runs[-1].append(frame - pos * RATE)
+                if not settling:
+                    item.z_runs[-1].append(frame - pos * RATE)
                 if item.prev_boundary and len(item.z_runs) == 1 and len(item.z_runs[0]) >= 10:
                     item.prev_boundary.set(statistics.median(item.z_runs[0]))
                 if item.speed is None and item.played >= 3.0 and item.entry.kind == "episode":
