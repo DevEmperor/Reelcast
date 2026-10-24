@@ -11,6 +11,8 @@ Ablauf
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +31,7 @@ from .model import (
     Reporter,
 )
 
+DEBUG = bool(os.environ.get("REELCAST_DEBUG"))
 TICK = 0.2
 END_TOLERANCE = 3.0  # a pause this close to the end counts as "episode finished"
 NO_SOUND_TIMEOUT = 25.0
@@ -191,6 +194,12 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
         # Spotify sometimes jumps to its remembered podcast position on its own, right after
         # playback starts – even after we asked for 0:00. Early on: just start over.
         pos = sp.position() if status == "Playing" else None
+        if DEBUG:
+            print(f"[rec] t={now - started:6.1f} status={status:8} pos={pos if pos is None else round(pos, 2)} "
+                  f"content={content:6.2f} restarts={restarts}", file=sys.stderr)
+        if pos is not None and content >= expected - END_TOLERANCE and pos + 5 < content:
+            sp.pause()  # finished – Spotify started the episode over (repeat/autoplay)
+            return
         if pos is not None and last_pos is not None:
             jump = (pos - last_pos[0]) - (content - last_pos[1])
             if abs(jump) > 2.0 and content < 20 and restarts < 3:
