@@ -45,7 +45,7 @@ SPEED_TOL = 0.04
 DEBUG = bool(os.environ.get("REELCAST_DEBUG"))
 QUIET = 10 ** (-85 / 20)  # silence for fine cutting (practically digital zero)
 ZERO = 1e-6  # digital zero (pause/buffering)
-MIN_STALL = 0.05  # shorter buffering hiccups stay (Spotify stutters this briefly under load)
+MIN_STALL = 0.2  # a standing position counts as buffering from this long (and is cut from it)
 SOUND = 10 ** (-60 / 20)  # a track whose loudest moment stays below this was not recorded
 
 # Session states for front ends – the display text is up to them.
@@ -320,9 +320,12 @@ class AutoSession:
                     item.stall_open = item.last_frame
             else:
                 if item.stall_open is not None:
-                    item.stalls.append((item.stall_open, item.last_frame))
+                    # Spotify for Mac now and then reports a standing position for a moment
+                    # while it keeps playing – only a longer stand is buffering.
+                    if item.last_frame - item.stall_open >= MIN_STALL * RATE:
+                        item.stalls.append((item.stall_open, item.last_frame))
+                        item.z_runs.append([])
                     item.stall_open = None
-                    item.z_runs.append([])
                 item.played += dt
                 item.advanced += dpos
                 item.z_runs[-1].append(frame - pos * RATE)
