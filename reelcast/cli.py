@@ -503,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.gui:
         from .gui import main as gui_main
 
-        return gui_main()
+        return gui_main(auto=args.auto)
     if args.check:
         console.print(banner())
         console.print()

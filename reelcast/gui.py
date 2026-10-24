@@ -902,7 +902,7 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-def main() -> int:
+def main(auto: bool = False) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
@@ -911,6 +911,8 @@ def main() -> int:
     app.setStyleSheet(STYLE)
     win = MainWindow()
     win.show()
+    if auto:
+        QTimer.singleShot(300, lambda: win.auto.setChecked(True))
     return app.exec()
 
 

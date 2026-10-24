@@ -8,7 +8,7 @@
 //   reelcast-helper state [--interval S]
 //                                    Streams Spotify's player state as JSON lines.
 //   reelcast-helper control <command> [argument]
-//                                    play | pause | open URI | seek SECONDS | volume 0-100 | quit
+//                                    play | pause | next | open URI | seek SECONDS | volume 0-100 | quit
 //   reelcast-helper check            Permission and device overview as JSON.
 
 import AVFoundation
@@ -126,46 +126,71 @@ final class PCMWriter {
 final class SpotifyTap {
     let listen: Bool
     let writer = PCMWriter()
-    private let queue = DispatchQueue(label: "reelcast.tap")
+    private let control = DispatchQueue(label: "reelcast.tap.control")
     private var processes: [AudioObjectID] = []
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProc: AudioDeviceIOProcID?
     private var converter: AVAudioConverter?
     private var inFormat: AVAudioFormat?
+    private var passthrough = false
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: outRate,
                                           channels: outChannels, interleaved: true)!
-    private var lastAudio = DispatchTime.now()
-    private var silenceTimer: DispatchSourceTimer?
-    private var silenceClock = DispatchTime.now()
+    private var timer: DispatchSourceTimer?
+    private var ticks = 0
+
+    // Shared between the real-time IO thread and the control queue.
+    private let lock = NSLock()
+    private var lastIO: UInt64 = 0  // uptime (ns) of the last IO callback
+    private var paddedUntil: UInt64 = 0  // uptime (ns) up to which silence was written
+    private var callbacks = 0
+    private var framesIn = 0
+    private var framesOut = 0
+    private var lastIssue = ""
+    private var lastStats: UInt64 = 0
 
     init(listen: Bool) { self.listen = listen }
 
+    private func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+
     func start() {
-        // Keep the stream going with silence while Spotify has no audio process (yet).
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(10))
-        timer.setEventHandler { [weak self] in self?.tick() }
-        timer.resume()
-        silenceTimer = timer
+        paddedUntil = now()
+        let t = DispatchSource.makeTimerSource(queue: control)
+        t.schedule(deadline: .now(), repeating: .milliseconds(10))
+        t.setEventHandler { [weak self] in self?.tick() }
+        t.resume()
+        timer = t
         emit(["event": "started", "rate": outRate, "listen": listen])
     }
 
+    /// Every 10 ms: look for Spotify's processes (every 0.5 s) and keep the stream
+    /// continuous – while no audio arrives (no tap yet, Spotify paused), write silence
+    /// in real time, just like PipeWire's monitor does on Linux.
     private func tick() {
-        let current = spotifyProcesses()
-        if current != processes {
-            rebuild(current)
+        ticks += 1
+        if ticks % 50 == 1 {
+            let current = spotifyProcesses()
+            if current != processes { rebuild(current) }
         }
-        if tapID == kAudioObjectUnknown {
-            // write silence in real time
-            let now = DispatchTime.now()
-            let elapsed = Double(now.uptimeNanoseconds - silenceClock.uptimeNanoseconds) / 1e9
-            let frames = Int(elapsed * outRate)
-            if frames > 0 {
-                writer.append(Data(count: frames * Int(outChannels) * 4))
-                silenceClock = silenceClock + .nanoseconds(Int(Double(frames) / outRate * 1e9))
+        let t = now()
+        var pad = 0
+        var stats: [String: Any]?
+        lock.lock()
+        if t &- lastIO > 250_000_000 || lastIO == 0 {
+            let from = max(paddedUntil, lastIO)
+            if t > from {
+                pad = Int(Double(t - from) / 1e9 * outRate)
+                if pad > 0 { paddedUntil = from + UInt64(Double(pad) / outRate * 1e9) }
             }
         }
+        if tapID != kAudioObjectUnknown, t &- lastStats > 3_000_000_000 {
+            lastStats = t
+            stats = ["event": "stats", "callbacks": callbacks, "framesIn": framesIn,
+                     "framesOut": framesOut, "issue": lastIssue]
+        }
+        lock.unlock()
+        if pad > 0 { writer.append(Data(count: pad * Int(outChannels) * 4)) }
+        if let s = stats { emit(s) }
     }
 
     private func teardown() {
@@ -188,7 +213,6 @@ final class SpotifyTap {
     private func rebuild(_ current: [AudioObjectID]) {
         teardown()
         processes = current
-        silenceClock = DispatchTime.now()
         guard !current.isEmpty else {
             emit(["event": "tap", "processes": 0])
             return
@@ -206,21 +230,21 @@ final class SpotifyTap {
             return
         }
         tapID = tap
-        guard let outputUID = defaultOutputUID() else {
-            emit(["event": "error", "message": "no default output device"])
-            return
-        }
-        let aggregate: [String: Any] = [
+        // Aggregate device that contains only the tap: no microphone or other inputs end up
+        // in it (and macOS doesn't ask for microphone access).
+        var aggregate: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Reelcast Tap",
             kAudioAggregateDeviceUIDKey: "reelcast.tap." + UUID().uuidString,
-            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
             kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outputUID]],
             kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: true,
                                               kAudioSubTapUIDKey: desc.uuid.uuidString]],
         ]
+        if ProcessInfo.processInfo.environment["REELCAST_TAP_WITH_OUTPUT"] != nil, let outputUID = defaultOutputUID() {
+            aggregate[kAudioAggregateDeviceMainSubDeviceKey] = outputUID
+            aggregate[kAudioAggregateDeviceSubDeviceListKey] = [[kAudioSubDeviceUIDKey: outputUID]]
+        }
         var agg = AudioObjectID(kAudioObjectUnknown)
         status = AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &agg)
         guard status == noErr else {
@@ -238,7 +262,10 @@ final class SpotifyTap {
         }
         inFormat = format
         converter = conv
-        status = AudioDeviceCreateIOProcIDWithBlock(&ioProc, agg, queue) { [weak self] _, input, _, _, _ in
+        passthrough = format.commonFormat == .pcmFormatFloat32 && format.sampleRate == outRate
+            && format.channelCount == outChannels && format.isInterleaved
+        // The IO block runs on Core Audio's real-time thread (no queue): it only copies data.
+        status = AudioDeviceCreateIOProcIDWithBlock(&ioProc, agg, nil) { [weak self] _, input, _, _, _ in
             self?.process(input)
         }
         guard status == noErr, let proc = ioProc else {
@@ -247,21 +274,55 @@ final class SpotifyTap {
         }
         status = AudioDeviceStart(agg, proc)
         emit(["event": "tap", "processes": current.count, "inputRate": format.sampleRate,
-              "status": Int(status)])
+              "channels": Int(format.channelCount), "interleaved": format.isInterleaved,
+              "passthrough": passthrough, "status": Int(status)])
     }
 
     private func process(_ input: UnsafePointer<AudioBufferList>) {
-        guard let conv = converter, let format = inFormat else { return }
-        let list = UnsafeMutablePointer(mutating: input)
-        guard let inBuf = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: list, deallocator: nil) else { return }
+        let t = now()
+        lock.lock()
+        lastIO = t
+        if paddedUntil < t { paddedUntil = t }
+        callbacks += 1
+        lock.unlock()
+        guard let format = inFormat else { return }
+        var list = UnsafeMutablePointer(mutating: input)
+        let all = UnsafeMutableAudioBufferListPointer(list)
+        let expected = format.isInterleaved ? 1 : Int(format.channelCount)
+        var subset: UnsafeMutableAudioBufferListPointer?
+        if all.count > expected {
+            // Inputs of other devices come first; the tap's buffers are the last ones.
+            let sub = AudioBufferList.allocate(maximumBuffers: expected)
+            for i in 0..<expected { sub[i] = all[all.count - expected + i] }
+            subset = sub
+            list = sub.unsafeMutablePointer
+        }
+        defer { if let sub = subset { free(sub.unsafeMutablePointer) } }
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+
+        if passthrough, let first = buffers.first, let data = first.mData {
+            let bytes = Int(first.mDataByteSize)
+            writer.append(Data(bytes: data, count: bytes))
+            let frames = bytes / (Int(outChannels) * 4)
+            lock.lock()
+            framesIn += frames
+            framesOut += frames
+            lock.unlock()
+            return
+        }
+        guard let conv = converter,
+              let inBuf = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: list, deallocator: nil) else {
+            lock.lock(); lastIssue = "buffer wrap failed (buffers: \(all.count))"; lock.unlock()
+            return
+        }
         let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
-        let byteSize = UnsafeMutableAudioBufferListPointer(list).first?.mDataByteSize ?? 0
+        let byteSize = buffers.first?.mDataByteSize ?? 0
         inBuf.frameLength = bytesPerFrame > 0 ? byteSize / bytesPerFrame : 0
         let capacity = AVAudioFrameCount(Double(inBuf.frameLength) * outRate / format.sampleRate) + 16
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: capacity) else { return }
         var consumed = false
         var error: NSError?
-        conv.convert(to: outBuf, error: &error) { _, status in
+        let result = conv.convert(to: outBuf, error: &error) { _, status in
             if consumed {
                 status.pointee = .noDataNow
                 return nil
@@ -274,10 +335,18 @@ final class SpotifyTap {
         if n > 0, let ptr = outBuf.floatChannelData?[0] {
             writer.append(Data(bytes: ptr, count: n * 4))
         }
+        lock.lock()
+        if result == .error { lastIssue = "convert: \(error?.localizedDescription ?? "?")" }
+        framesIn += Int(inBuf.frameLength)
+        framesOut += Int(outBuf.frameLength)
+        lock.unlock()
     }
 
     func stop() {
-        queue.sync { teardown() }
+        control.sync {
+            timer?.cancel()
+            teardown()
+        }
     }
 }
 
@@ -353,6 +422,7 @@ func control(_ args: [String]) -> Int32 {
     switch command {
     case "play": body = "play"
     case "pause": body = "pause"
+    case "next": body = "next track"
     case "open": body = "play track \(quoted(arg))"
     case "seek": body = "set player position to \(Double(arg) ?? 0)"
     case "volume": body = "set sound volume to \(Int(arg) ?? 100)"

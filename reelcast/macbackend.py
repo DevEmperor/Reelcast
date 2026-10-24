@@ -164,6 +164,11 @@ class MacSpotify:
     def pause(self) -> None:
         _control("pause")
 
+    def next_track(self) -> None:
+        err = _control("next")
+        if err:
+            raise ReelcastError(err)
+
     def set_position(self, trackid: str, seconds: float) -> bool:
         return not _control("seek", f"{seconds:.3f}")
 

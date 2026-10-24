@@ -158,6 +158,9 @@ class Spotify:
         except GLib.Error:
             pass
 
+    def next_track(self) -> None:
+        self._call("Next")
+
     def set_position(self, trackid: str, seconds: float) -> bool:
         try:
             self._call("SetPosition", GLib.Variant("(ox)", (trackid, int(seconds * 1e6))))
