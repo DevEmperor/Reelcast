@@ -49,11 +49,12 @@ def fetch_episode(eid: str) -> Episode:
         return _from_oembed(eid)
 
 
-def _embed_entity(kind: str, ident: str, tries: int = 8) -> dict:
+def _embed_entity(kind: str, ident: str, tries: int = 4) -> dict:
     """The entity from Spotify's embed page.
 
-    Some of Spotify's servers answer "page not found" for pages that exist – as HTTP 404 or
-    as a 404 page with status 200, for about every second request. Asking again helps.
+    "Page not found" comes as HTTP 404 or as a 404 page with status 200. While an episode is
+    being taken down, Spotify's servers disagree for a while, so ask a few times.
+    For a show, the entity is its latest episode.
     """
     for attempt in range(1, tries + 1):
         try:
@@ -132,7 +133,7 @@ def _from_oembed(eid: str) -> Episode:
 def fetch_track_release(track_id: str) -> str:
     """Release date (YYYY-MM-DD) of a music track, empty if unknown."""
     try:
-        ent = _embed_entity("track", track_id, tries=4)
+        ent = _embed_entity("track", track_id, tries=2)
         return ((ent.get("releaseDate") or {}).get("isoString") or "")[:10]
     except Exception:
         return ""

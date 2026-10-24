@@ -28,7 +28,9 @@ from pathlib import Path
 import numpy as np
 
 ALBUM = "spotify:album:4C4LvbYS0pxXLW5sGD9EK5"
-EPISODE = "https://open.spotify.com/episode/6L4teFulT1MD53bBA3vFkz"
+# tagesschau in 100 Sekunden: about 2 minutes, a new episode several times a day – and old
+# ones disappear after a few hours, so the test always takes the latest one.
+SHOW = "4QwUbrMJZ27DpjuYmN4Tun"
 WARMUP = "spotify:track:0WDBs60pTRESRkt7FsMmoQ"  # not on the test album
 PLATFORM = "macOS" if sys.platform == "darwin" else "Linux"
 
@@ -202,7 +204,11 @@ def run(report: Path, listen: bool = False, keep_audio: bool = False) -> int:
             time.sleep(1)
 
             log("Single episode via link field")
-            ask("link", EPISODE)
+            from .spotify_meta import _embed_entity
+
+            episode = "https://open.spotify.com/episode/" + _embed_entity("show", SHOW)["id"]
+            log(f"Episode {episode}")
+            ask("link", episode)
             wait_for(gui_busy, 20, "episode job to start")
             time.sleep(25)
             ask("shot", "06-recording-episode")

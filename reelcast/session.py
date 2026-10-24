@@ -238,10 +238,20 @@ class AutoSession:
                     show(READY)
                     continue
 
-                restarted = item is not None and tid == item.trackid and pos + 2.0 < item.last_pos
+                # Back to the start = the track starts over. Spotify for Mac also does this on
+                # its own right after a track begins (first 1.6 s, then 0.1 s).
+                restarted = item is not None and tid == item.trackid and (
+                    pos + 2.0 < item.last_pos or (pos < START_TOL and pos + 0.5 < item.last_pos))
                 if item is None or tid != item.trackid or restarted:
                     if item:
+                        early = restarted and item.played < 3.0
+                        carried = None
+                        if early:
+                            carried, item.prev_boundary = item.prev_boundary, None
                         self._finish(item, cap, natural=self._at_end(item, now, "Playing"))
+                        if early:  # a few seconds that start over: no entry, and the transition
+                            self._drop(item.entry)  # from the previous track is measured anew
+                            self._open_boundary = carried
                     item = self._begin(meta, tid, pos, frame, now, cap)
                     show(RECORDING if item.seg else IGNORED)
                     continue
@@ -297,6 +307,9 @@ class AutoSession:
         dpos = pos - item.last_pos
         if status == "Playing" and dt > 0:
             if dpos < -0.5 or dpos > dt + 1.0:
+                if DEBUG:
+                    print(f"[session] seek in {item.entry.title!r}: {item.last_pos:.2f} → {pos:.2f} s "
+                          f"within {dt:.2f} s", file=sys.stderr)
                 item.seeked = True
                 if item.entry.state == "recording":
                     item.entry.state, item.entry.reason = "partial", "seeked"
@@ -353,12 +366,17 @@ class AutoSession:
         sp.set_position(item.trackid, 0)
         cap.end_segment(item.seg, cap.frames)
         threading.Thread(target=item.seg.discard, daemon=True).start()
-        item.entry.state = "dropped"
         self._late_flag = True
-        self.entries.remove(item.entry)
-        self.rep.entry(item.entry)
+        self._drop(item.entry)
         self.rep.info("Spotify's audio arrived a moment late – jumped back to the start of the track.")
         return True
+
+    def _drop(self, entry: Entry) -> None:
+        """Remove an entry from the log altogether."""
+        entry.state = "dropped"
+        if entry in self.entries:
+            self.entries.remove(entry)
+        self.rep.entry(entry)
 
     def _at_end(self, item: _Item, now: float, status: str) -> bool:
         guess = item.last_pos + (now - item.last_wall if status == "Playing" else 0.0)

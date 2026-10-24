@@ -169,6 +169,7 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
     # Both stand still while buffering, so the ratio stays meaningful then too.
     speed_ref: tuple[float, float] | None = None  # (position, content)
     speed_strikes = 0
+    furthest = 0.0  # furthest position Spotify reached
 
     while True:
         cancel.sleep(TICK)
@@ -194,9 +195,11 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
         # Spotify sometimes jumps to its remembered podcast position on its own, right after
         # playback starts – even after we asked for 0:00. Early on: just start over.
         pos = sp.position() if status == "Playing" else None
+        furthest = max(furthest, pos or 0.0)
         if DEBUG:
             print(f"[rec] t={now - started:6.1f} status={status:8} pos={pos if pos is None else round(pos, 2)} "
-                  f"content={content:6.2f} restarts={restarts}", file=sys.stderr)
+                  f"content={content:6.2f} restarts={restarts} volume={sp.volume()} streams={n_streams} "
+                  f"peak={cap.peak_db:.0f} dB", file=sys.stderr)
         if pos is not None and content >= expected - END_TOLERANCE and pos + 5 < content:
             sp.pause()  # finished – Spotify started the episode over (repeat/autoplay)
             return
@@ -272,6 +275,11 @@ def _watch(sp, sink, cap, ep, trackid, expected, opts, reporter, cancel) -> None
                 raise ReelcastError(
                     "Spotify is playing, but not on this computer – probably another device is "
                     "active via Spotify Connect. Pick \"This computer\" in Spotify."
+                )
+            if furthest < 1.0:
+                raise ReelcastError(
+                    "Spotify doesn't play this episode – it stays at 0:00. "
+                    "Is it still available in Spotify?"
                 )
             raise ReelcastError("Spotify is playing, but no sound arrives.")
         if cap.first_sound is not None and cap.silent_for > 20 and not warned_silence:

@@ -145,7 +145,10 @@ final class SpotifyTap {
     private let lock = NSLock()
     private var lastIO: UInt64 = 0  // uptime (ns) of the last IO callback
     private var paddedUntil: UInt64 = 0  // uptime (ns) up to which silence was written
+    private var paddedSinceIO = 0  // frames of silence written since the last IO callback
+    private var nextSampleTime = -1.0  // IO thread only: where the next buffer should start
     private var callbacks = 0
+    private var framesFilled = 0  // silence for buffers Core Audio dropped (overload)
     private var framesIn = 0
     private var framesOut = 0
     private var lastIssue = ""
@@ -182,13 +185,16 @@ final class SpotifyTap {
             let from = max(paddedUntil, lastIO)
             if t > from {
                 pad = Int(Double(t - from) / 1e9 * outRate)
-                if pad > 0 { paddedUntil = from + UInt64(Double(pad) / outRate * 1e9) }
+                if pad > 0 {
+                    paddedUntil = from + UInt64(Double(pad) / outRate * 1e9)
+                    paddedSinceIO += pad
+                }
             }
         }
         if tapID != kAudioObjectUnknown, t &- lastStats > 3_000_000_000 {
             lastStats = t
             stats = ["event": "stats", "callbacks": callbacks, "framesIn": framesIn,
-                     "framesOut": framesOut, "issue": lastIssue]
+                     "framesOut": framesOut, "framesFilled": framesFilled, "issue": lastIssue]
         }
         lock.unlock()
         if pad > 0 { writer.append(Data(count: pad * Int(outChannels) * 4)) }
@@ -210,6 +216,7 @@ final class SpotifyTap {
         aggregateID = AudioObjectID(kAudioObjectUnknown)
         tapID = AudioObjectID(kAudioObjectUnknown)
         converter = nil
+        nextSampleTime = -1
     }
 
     private func rebuild(_ current: [AudioObjectID]) {
@@ -267,8 +274,8 @@ final class SpotifyTap {
         passthrough = format.commonFormat == .pcmFormatFloat32 && format.sampleRate == outRate
             && format.channelCount == outChannels && format.isInterleaved
         // The IO block runs on Core Audio's real-time thread (no queue): it only copies data.
-        status = AudioDeviceCreateIOProcIDWithBlock(&ioProc, agg, nil) { [weak self] _, input, _, _, _ in
-            self?.process(input)
+        status = AudioDeviceCreateIOProcIDWithBlock(&ioProc, agg, nil) { [weak self] _, input, inputTime, _, _ in
+            self?.process(input, at: inputTime.pointee)
         }
         guard status == noErr, let proc = ioProc else {
             emit(["event": "error", "message": "AudioDeviceCreateIOProcIDWithBlock failed (\(status))"])
@@ -280,14 +287,17 @@ final class SpotifyTap {
               "passthrough": passthrough, "status": Int(status)])
     }
 
-    private func process(_ input: UnsafePointer<AudioBufferList>) {
+    private func process(_ input: UnsafePointer<AudioBufferList>, at time: AudioTimeStamp) {
         let t = now()
         lock.lock()
         lastIO = t
         if paddedUntil < t { paddedUntil = t }
+        let padded = paddedSinceIO
+        paddedSinceIO = 0
         callbacks += 1
         lock.unlock()
         guard let format = inFormat else { return }
+        fillDropout(at: time, input: input, format: format, padded: padded)
         var list = UnsafeMutablePointer(mutating: input)
         let all = UnsafeMutableAudioBufferListPointer(list)
         let expected = format.isInterleaved ? 1 : Int(format.channelCount)
@@ -341,6 +351,27 @@ final class SpotifyTap {
         if result == .error { lastIssue = "convert: \(error?.localizedDescription ?? "?")" }
         framesIn += Int(inBuf.frameLength)
         framesOut += Int(outBuf.frameLength)
+        lock.unlock()
+    }
+
+    /// When the system is overloaded, Core Audio drops whole IO cycles; the next buffer's
+    /// sample time then jumps. Write silence for the missing part so the recording keeps
+    /// time with Spotify's position (minus what the idle padding already wrote).
+    private func fillDropout(at time: AudioTimeStamp, input: UnsafePointer<AudioBufferList>,
+                             format: AVAudioFormat, padded: Int) {
+        guard time.mFlags.contains(.sampleTimeValid) else { return }
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        let first = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input)).last
+        let frames = bytesPerFrame > 0 ? Int(first?.mDataByteSize ?? 0) / bytesPerFrame : 0
+        defer { nextSampleTime = time.mSampleTime + Double(frames) }
+        guard nextSampleTime >= 0 else { return }
+        let gap = time.mSampleTime - nextSampleTime
+        guard gap >= 1, gap < format.sampleRate * 10 else { return }
+        let missing = Int(gap * outRate / format.sampleRate) - padded
+        guard missing > 0 else { return }
+        writer.append(Data(count: missing * Int(outChannels) * 4))
+        lock.lock()
+        framesFilled += missing
         lock.unlock()
     }
 
